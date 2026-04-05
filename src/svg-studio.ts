@@ -372,24 +372,24 @@ export function mount(root: HTMLElement): void {
         <p class="pop-toolbar-hint" id="pop-toolbar-hint">Toolbar is hidden. Pin it to use tools, zoom, and export.</p>
       </div>
       <div class="pop-main">
-        <aside class="pop-layers" aria-label="Layers, transform, and style">
+        <aside class="pop-layers" aria-label="Layers and properties">
           <div class="pop-layer-aside-head">
             <div class="pop-layer-tabs" role="tablist" aria-label="Layer panel">
               <button type="button" class="pop-layer-tab pop-layer-tab-active" role="tab" id="pop-tab-layers" aria-selected="true" aria-controls="pop-layers-tree-panel">Layers</button>
-              <button type="button" class="pop-layer-tab" role="tab" id="pop-tab-parent" aria-selected="false" aria-controls="pop-layers-parent-panel">Parent</button>
+              <button type="button" class="pop-layer-tab" role="tab" id="pop-tab-parent" aria-selected="false" aria-controls="pop-layers-parent-panel" title="See the path from the top of the tree down to the selected layer">Path</button>
             </div>
-            <p class="pop-layer-aside-hint">Drag a row to reorder or nest (lower half nests). ⌘ or Ctrl+click to multi-select.</p>
+            <p class="pop-layer-aside-hint" id="pop-layer-aside-hint">Drag to reorder or nest · ⌘/Ctrl+click multi-select</p>
           </div>
           <div id="pop-layers-tree-panel" class="pop-layer-tab-panel" role="tabpanel" aria-labelledby="pop-tab-layers">
             <ul class="pop-layer-list" id="pop-layers" data-pop-layer-tree></ul>
           </div>
           <div id="pop-layers-parent-panel" class="pop-layer-tab-panel" hidden role="tabpanel" aria-labelledby="pop-tab-parent">
-            <p class="pop-parent-panel-desc" id="pop-parent-panel-desc">Select a layer to see its parent chain.</p>
-            <ol class="pop-parent-chain" id="pop-parent-chain" aria-label="Parent chain from root to selection"></ol>
-            <button type="button" class="pop-btn pop-btn-block" id="pop-select-siblings" disabled>Select all siblings</button>
+            <p class="pop-parent-panel-desc" id="pop-parent-panel-desc">Select a layer to see the path from the root down to it.</p>
+            <ol class="pop-parent-chain" id="pop-parent-chain" aria-label="Path from root to selected layer, top to bottom"></ol>
+            <button type="button" class="pop-btn pop-btn-block" id="pop-select-siblings" disabled title="Select every layer with the same parent as the current one">Select siblings</button>
           </div>
           <div class="pop-props">
-            <h2>Transform</h2>
+            <h2 class="pop-panel-h">Position</h2>
             <div class="pop-prop-grid" id="pop-prop-grid">
               <label class="pop-field"><span class="pop-field-lbl">X</span><input type="number" id="pop-px" class="pop-num" step="1" disabled /></label>
               <label class="pop-field"><span class="pop-field-lbl">Y</span><input type="number" id="pop-py" class="pop-num" step="1" disabled /></label>
@@ -399,81 +399,85 @@ export function mount(root: HTMLElement): void {
             <label class="pop-field pop-field-fs" id="pop-fs-wrap"><span class="pop-field-lbl">Font size</span><input type="number" id="pop-pfs" class="pop-num" step="1" min="4" max="400" disabled /></label>
           </div>
           <div class="pop-props pop-style-section">
-            <h2>Style</h2>
-            <p class="pop-style-section-desc">Defaults for new shapes when nothing is selected; otherwise updates the current selection.</p>
+            <h2 class="pop-panel-h">Fill &amp; stroke</h2>
             <div class="pop-tb-style-grid">
-              <div class="pop-tb-style-block" id="pop-fill-style-block">
-                <span class="pop-tb-style-lbl">Fill</span>
-                <div class="pop-color-picker">
-                  <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
-                  <input type="color" class="pop-color-native" id="pop-fill" value="#a78bfa" tabindex="-1" />
-                  <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
-                    <div class="pop-color-panel-cap">Theme colors</div>
-                    <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
-                    <div class="pop-color-panel-cap">Standard colors</div>
-                    <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
-                    <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
-                  </div>
-                </div>
-              </div>
-              <div id="pop-stroke-style-blocks">
-                <div class="pop-tb-style-block">
-                  <span class="pop-tb-style-lbl">Stroke</span>
+              <div class="pop-appearance-colors">
+                <div class="pop-tb-style-block" id="pop-fill-style-block">
+                  <span class="pop-tb-style-lbl">Fill</span>
                   <div class="pop-color-picker">
-                    <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
-                    <input type="color" class="pop-color-native" id="pop-stroke" value="#4c1d95" tabindex="-1" />
-                    <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
+                    <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
+                    <input type="color" class="pop-color-native" id="pop-fill" value="#a78bfa" tabindex="-1" />
+                    <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
                       <div class="pop-color-panel-cap">Theme colors</div>
-                      <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
+                      <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
                       <div class="pop-color-panel-cap">Standard colors</div>
-                      <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
-                      <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
+                      <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
+                      <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
                     </div>
                   </div>
                 </div>
-                <label class="pop-tb-style-block pop-tb-stroke-w">
-                  <span class="pop-tb-style-lbl">Stroke width</span>
-                  <input type="range" id="pop-stroke-w" min="0" max="12" value="2" aria-label="Stroke width" />
+                <div id="pop-stroke-style-blocks" class="pop-stroke-col">
+                  <div class="pop-tb-style-block">
+                    <span class="pop-tb-style-lbl">Stroke</span>
+                    <div class="pop-color-picker">
+                      <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
+                      <input type="color" class="pop-color-native" id="pop-stroke" value="#4c1d95" tabindex="-1" />
+                      <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
+                        <div class="pop-color-panel-cap">Theme colors</div>
+                        <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
+                        <div class="pop-color-panel-cap">Standard colors</div>
+                        <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
+                        <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
+                      </div>
+                    </div>
+                  </div>
+                  <label class="pop-tb-style-block pop-tb-stroke-w">
+                    <span class="pop-tb-style-lbl">Width</span>
+                    <input type="range" id="pop-stroke-w" min="0" max="12" value="2" aria-label="Stroke width" />
+                  </label>
+                </div>
+              </div>
+              <div class="pop-appearance-sliders">
+                <label class="pop-tb-style-block pop-tb-opacity">
+                  <span class="pop-tb-style-lbl">Opacity</span>
+                  <input type="range" id="pop-opacity" min="0" max="100" value="100" aria-label="Opacity" />
+                </label>
+                <label class="pop-tb-style-block pop-tb-rx" id="pop-rx-wrap">
+                  <span class="pop-tb-style-lbl">Radius</span>
+                  <input type="range" id="pop-rx" min="0" max="80" value="0" aria-label="Corner radius" />
                 </label>
               </div>
-              <label class="pop-tb-style-block pop-tb-opacity">
-                <span class="pop-tb-style-lbl">Opacity</span>
-                <input type="range" id="pop-opacity" min="0" max="100" value="100" aria-label="Opacity" />
-              </label>
-              <label class="pop-tb-style-block pop-tb-rx" id="pop-rx-wrap">
-                <span class="pop-tb-style-lbl">Corner radius</span>
-                <input type="range" id="pop-rx" min="0" max="80" value="0" aria-label="Corner radius" />
-              </label>
             </div>
           </div>
           <div class="pop-props" id="pop-typography-props" hidden>
-            <h2>Typography</h2>
-            <p class="pop-style-section-desc">When a text layer is selected.</p>
-            <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Font family</span><input type="text" id="pop-font-family" class="pop-num" spellcheck="false" /></label>
+            <h2 class="pop-panel-h">Text</h2>
+            <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Font</span><input type="text" id="pop-font-family" class="pop-num" spellcheck="false" /></label>
             <div class="pop-prop-grid">
               <label class="pop-field"><span class="pop-field-lbl">Weight</span><input type="number" id="pop-font-weight" class="pop-num" min="100" max="900" step="100" /></label>
-              <label class="pop-field"><span class="pop-field-lbl">Letter px</span><input type="number" id="pop-letter-spacing" class="pop-num" step="0.5" /></label>
+              <label class="pop-field"><span class="pop-field-lbl">Tracking</span><input type="number" id="pop-letter-spacing" class="pop-num" step="0.5" /></label>
             </div>
             <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Line height</span><input type="number" id="pop-line-height" class="pop-num" min="0.5" max="3" step="0.05" /></label>
           </div>
           <div class="pop-props" id="pop-group-layout-props" hidden>
-            <h2>Layout</h2>
-            <p class="pop-style-section-desc">Group stack for HTML export (flexbox).</p>
-            <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Mode</span>
-              <select id="pop-group-layout" aria-label="Group layout mode">
-                <option value="none">Freeform</option>
-                <option value="stack-v">Stack vertical</option>
-                <option value="stack-h">Stack horizontal</option>
+            <h2 class="pop-panel-h">HTML: children in group</h2>
+            <p class="pop-panel-desc" id="pop-group-layout-desc">
+              Canvas stays the same. This only changes the exported HTML/CSS: either keep each child’s position, or lay children out with flexbox (stack).
+            </p>
+            <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Layout</span>
+              <select id="pop-group-layout" aria-label="How children are arranged in exported HTML" aria-describedby="pop-group-layout-desc">
+                <option value="none">Freeform — absolute positions</option>
+                <option value="stack-v">Vertical stack (flex column)</option>
+                <option value="stack-h">Horizontal stack (flex row)</option>
               </select>
             </label>
             <div class="pop-prop-grid">
               <label class="pop-field"><span class="pop-field-lbl">Gap</span><input type="number" id="pop-group-gap" class="pop-num" min="0" step="1" /></label>
-              <label class="pop-field"><span class="pop-field-lbl">Padding</span><input type="number" id="pop-group-pad" class="pop-num" min="0" step="1" /></label>
+              <label class="pop-field"><span class="pop-field-lbl">Pad</span><input type="number" id="pop-group-pad" class="pop-num" min="0" step="1" /></label>
             </div>
           </div>
-          <div class="pop-props">
+          <div class="pop-props pop-props-tight">
             <div class="pop-symmetry">
-              <label class="pop-check"><input type="checkbox" id="pop-guides" checked /><span>Symmetry guides &amp; snap</span></label>
+              <label class="pop-check"><input type="checkbox" id="pop-guides" checked /><span>Guides &amp; snap</span></label>
               <p class="pop-hint" id="pop-sym-hint"></p>
             </div>
           </div>
@@ -513,6 +517,7 @@ export function mount(root: HTMLElement): void {
   const layersParentPanel = root.querySelector<HTMLElement>('#pop-layers-parent-panel')!
   const parentPanelDesc = root.querySelector<HTMLParagraphElement>('#pop-parent-panel-desc')!
   const parentChainEl = root.querySelector<HTMLOListElement>('#pop-parent-chain')!
+  const layerAsideHint = root.querySelector<HTMLParagraphElement>('#pop-layer-aside-hint')!
   const btnSelectSiblings = root.querySelector<HTMLButtonElement>('#pop-select-siblings')!
   const fileInput = root.querySelector<HTMLInputElement>('#pop-file')!
   const fillInput = root.querySelector<HTMLInputElement>('#pop-fill')!
@@ -1534,6 +1539,9 @@ export function mount(root: HTMLElement): void {
     tabParentBtn.setAttribute('aria-selected', String(!layersOn))
     layersTreePanel.hidden = !layersOn
     layersParentPanel.hidden = layersOn
+    layerAsideHint.textContent = layersOn
+      ? 'Drag to reorder or nest · ⌘/Ctrl+click multi-select'
+      : 'Top → bottom is root to selection. Click a row to select that layer.'
     if (!layersOn) renderParentPanel()
   }
 
@@ -1541,7 +1549,7 @@ export function mount(root: HTMLElement): void {
     parentChainEl.replaceChildren()
     const prim = primarySelectionId()
     if (!prim) {
-      parentPanelDesc.textContent = 'Select a layer to see its parent chain.'
+      parentPanelDesc.textContent = 'Select a layer on the canvas or in the Layers list.'
       btnSelectSiblings.disabled = true
       return
     }
@@ -1549,8 +1557,8 @@ export function mount(root: HTMLElement): void {
     const chain = ancestorChainOrdered(prim)
     parentPanelDesc.textContent =
       chain.length > 1
-        ? 'Root to selection — click a row to select that layer.'
-        : 'This layer is at the root of the tree.'
+        ? 'Ancestors above, selection last. Click any row to select that layer.'
+        : 'Nothing is nested above this layer (it is a direct child of the frame or root).'
     for (const cid of chain) {
       const item = getNode(cid)
       if (!item) continue
