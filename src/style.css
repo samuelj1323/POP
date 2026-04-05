@@ -61,32 +61,75 @@ body {
   flex-direction: column;
   max-width: none;
   margin: 0;
-  padding: 0 0 0.75rem;
+  /* Room around chrome so the bar can “float” with visible shadow */
+  padding: 0.35rem clamp(0.5rem, 2vw, 1.25rem) 0.5rem;
 }
 
-.pop-header {
+/* Sticky title bar + ribbon — elevated “pop out” card above the canvas */
+.pop-app-chrome {
+  position: sticky;
+  top: 0.35rem;
+  z-index: 120;
   flex-shrink: 0;
-  padding: 1.25rem 1.25rem 0;
-  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  overflow: visible;
+  border-radius: 12px;
+  border: 1px solid rgba(196, 181, 253, 0.28);
+  background:
+    linear-gradient(165deg, rgba(42, 32, 72, 0.55) 0%, rgba(10, 6, 18, 0.92) 48%, rgba(8, 5, 14, 0.97) 100%);
+  backdrop-filter: blur(18px) saturate(1.15);
+  -webkit-backdrop-filter: blur(18px) saturate(1.15);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.45) inset,
+    0 1px 0 rgba(255, 255, 255, 0.07) inset,
+    0 3px 10px rgba(0, 0, 0, 0.35),
+    0 20px 56px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(124, 58, 237, 0.12),
+    0 0 72px rgba(124, 58, 237, 0.14);
+}
+
+.pop-chrome-titlebar {
+  display: flex;
+  align-items: center;
+  padding: 0.28rem 0.85rem 0.26rem;
+  gap: 0.65rem;
+  border-bottom: 1px solid rgba(196, 181, 253, 0.16);
+  border-radius: 12px 12px 0 0;
+  background: linear-gradient(180deg, rgba(48, 36, 82, 0.42) 0%, rgba(20, 14, 34, 0.2) 100%);
+}
+
+.pop-chrome-title-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+  min-width: 0;
 }
 
 .pop-title {
-  margin: 0 0 0.35rem;
+  margin: 0;
+  flex-shrink: 0;
   font-family: var(--display);
-  font-size: 1.85rem;
+  font-size: 1.05rem;
   font-weight: 800;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.03em;
   text-transform: uppercase;
+  line-height: 1.1;
   background: linear-gradient(120deg, #f5f0ff 0%, #d8b4fe 55%, #c084fc 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+  filter: drop-shadow(0 1px 8px rgba(167, 139, 250, 0.4)) drop-shadow(0 0 16px rgba(192, 132, 252, 0.18));
 }
 
 .pop-sub {
   margin: 0;
+  flex: 1 1 10rem;
   color: var(--muted);
-  max-width: 52rem;
+  font-size: 0.68rem;
+  line-height: 1.25;
+  min-width: 0;
 }
 
 .pop-sub code {
@@ -98,111 +141,184 @@ body {
   color: var(--text);
 }
 
-.pop-toolbar-wrap {
-  flex-shrink: 0;
-  padding: 0 1.25rem;
-  margin-bottom: 1rem;
-}
-
-.pop-toolbar-wrap.pop-toolbar-pinned {
-  position: sticky;
-  top: 0;
-  z-index: 80;
-  margin-top: -0.25rem;
-  padding-top: 0.25rem;
-  padding-bottom: 0.35rem;
-  margin-bottom: calc(1rem - 0.35rem);
-  background: rgba(10, 6, 18, 0.82);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
-}
-
-.pop-toolbar-bar {
+.pop-chrome-ribbon {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 0.65rem 0.75rem;
-  padding: 0.75rem 1rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  align-items: stretch;
+  gap: 0.3rem;
+  padding: 0.3rem 0.75rem 0.35rem;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  border-radius: 0 0 12px 12px;
 }
 
-.pop-toolbar-pin {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+.pop-ribbon-sep {
+  width: 1px;
   flex-shrink: 0;
-  width: 2.5rem;
-  height: 2.5rem;
-  padding: 0;
+  align-self: stretch;
+  min-height: 2.35rem;
+  margin: 0.08rem 0;
+  background: var(--border);
+  opacity: 0.85;
 }
 
-.pop-toolbar-pin-glyph {
-  font-size: 1.15rem;
-  line-height: 1;
-  opacity: 0.9;
+.pop-ribbon-group {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: min-content;
+  max-width: 100%;
+  padding: 0.2rem 0.35rem 0.12rem;
+  background: linear-gradient(180deg, rgba(30, 23, 48, 0.95) 0%, rgba(18, 14, 32, 0.98) 100%);
+  border: 1px solid rgba(196, 181, 253, 0.18);
+  border-radius: 6px;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.05) inset,
+    0 2px 8px rgba(0, 0, 0, 0.22);
 }
 
-.pop-toolbar-expanded {
-  flex: 1;
+.pop-ribbon-group-wide {
+  flex: 1 1 auto;
+  min-width: min(100%, 12rem);
+}
+
+.pop-ribbon-group-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
   min-width: 0;
 }
 
-.pop-toolbar-sections {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 0.65rem;
+/* Compact zoom controls inside the ribbon */
+.pop-chrome-ribbon .pop-zoom-btn {
+  min-width: 1.55rem;
+  padding: 0.12rem 0.32rem;
+  font-size: 0.92rem;
+}
+
+.pop-chrome-ribbon select.pop-comp-pick {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.35rem;
+  min-height: 1.45rem;
+}
+
+.pop-chrome-ribbon .pop-tb-comp-insert-row .pop-btn {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.74rem;
+}
+
+.pop-ribbon-group-label {
+  margin-top: 0.08rem;
+  padding-top: 0.1rem;
+  border-top: 1px solid rgba(196, 181, 253, 0.15);
+  font-size: 0.56rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.15;
+}
+
+.pop-ribbon-tools-row {
+  flex-wrap: nowrap;
+}
+
+.pop-ribbon-tool-btn {
+  padding: 0.2rem 0.45rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  min-height: 1.55rem;
+  white-space: nowrap;
+}
+
+.pop-ribbon-view-block {
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.pop-ribbon-view-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+}
+
+.pop-ribbon-doc-block {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.25rem;
   width: 100%;
 }
 
-.pop-tb-section {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  overflow: hidden;
+.pop-ribbon-doc-frame .pop-tb-style-lbl {
+  margin-bottom: 0.08rem;
 }
 
-.pop-tb-section-head {
+.pop-ribbon-doc-file {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.12rem;
-  padding: 0.5rem 0.65rem 0.45rem;
-  border-bottom: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.1);
-  box-shadow: inset 3px 0 0 0 rgba(167, 139, 250, 0.45);
+  flex-wrap: wrap;
+  gap: 0.28rem;
 }
 
-.pop-tb-section-head .pop-tb-grid-title {
-  font-size: 0.82rem;
+.pop-ribbon-file-btn {
+  min-width: 3.75rem;
+  font-size: 0.74rem;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  padding: 0.22rem 0.45rem;
 }
 
-.pop-tb-section-head .pop-tb-grid-sub {
-  font-size: 0.68rem;
-  line-height: 1.25;
+#pop-tb-export-panel.pop-ribbon-group-main {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.3rem;
 }
 
-.pop-toolbar-hint {
-  margin: 0.45rem 0 0;
-  font-size: 0.82rem;
-  line-height: 1.4;
-  color: var(--muted);
-  max-width: 36rem;
+.pop-ribbon-export-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.3rem;
 }
 
-.pop-toolbar-hint[hidden] {
-  display: none !important;
+.pop-ribbon-arrange-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.3rem;
 }
 
-.pop-toolbar-sections .pop-tb-dd-panel {
+.pop-ribbon-action-compact {
+  min-height: 1.95rem;
+  padding: 0.2rem 0.35rem;
+}
+
+.pop-ribbon-action-compact .pop-tb-grid-title {
+  font-size: 0.74rem;
+}
+
+.pop-ribbon-action-compact .pop-tb-grid-sub {
+  font-size: 0.6rem;
+}
+
+.pop-ribbon-comp-inner {
+  padding: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.pop-ribbon-comp-actions {
+  margin-bottom: 0.22rem;
+}
+
+.pop-ribbon-comp-insert {
+  margin-top: 0 !important;
+  padding-top: 0.28rem !important;
+  border-top: 1px solid var(--border) !important;
+}
+
+.pop-ribbon-comp-inner .pop-tb-dd-desc {
+  display: none;
+}
+
+.pop-tb-dd-panel {
   position: relative;
   min-width: 0;
   max-width: none;
@@ -276,11 +392,12 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 2.25rem;
-  padding: 0 0.35rem;
-  border-radius: 8px;
+  min-height: 1.55rem;
+  padding: 0 0.28rem;
+  border-radius: 6px;
   background: var(--surface-2);
   border: 1px solid var(--border);
+  font-size: 0.74rem;
 }
 
 .pop-tb-style-panel .pop-tb-style-grid,
@@ -584,7 +701,7 @@ body {
   align-self: start;
   justify-self: start;
   width: min(260px, calc(100vw - 1.5rem));
-  max-height: min(calc(100% - 1.5rem), calc(100svh - 12rem));
+  max-height: min(calc(100% - 1.5rem), calc(100svh - 13.5rem));
   margin: 0.75rem;
   overflow: auto;
   background: rgba(21, 16, 34, 0.92);

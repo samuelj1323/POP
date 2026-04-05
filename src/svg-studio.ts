@@ -40,7 +40,6 @@ import {
   STORAGE_KEY_V2,
   STORAGE_KEY_V3,
 } from './studio/persistence.ts'
-const TOOLBAR_PIN_STORAGE_KEY = 'pop-toolbar-pinned'
 import type { PersistedStateV1, PersistedStateV2 } from './studio/persistence.ts'
 import type {
   ComponentDefinition,
@@ -187,189 +186,134 @@ export function mount(root: HTMLElement): void {
 
   root.innerHTML = `
     <div class="pop-app">
-      <header class="pop-header">
-        <h1 class="pop-title">Pop</h1>
-        <p class="pop-sub">Draw on the canvas, add images, then export SVG. Raster images become <code>&lt;image&gt;</code> in the SVG (embedded), not auto-traced vectors.</p>
-      </header>
-      <div class="pop-toolbar-wrap" id="pop-toolbar-wrap">
-        <div class="pop-toolbar-bar">
-          <button type="button" class="pop-btn pop-toolbar-pin" id="pop-toolbar-pin" aria-pressed="false" aria-expanded="false" aria-controls="pop-toolbar-expanded" aria-label="Pin toolbar" title="Pin toolbar">
-            <span class="pop-toolbar-pin-glyph" aria-hidden="true">📌</span>
-          </button>
-          <div class="pop-toolbar-expanded" id="pop-toolbar-expanded" hidden>
-            <div class="pop-toolbar-sections">
-              <section class="pop-tb-section" aria-labelledby="pop-tb-tools-h">
-                <div class="pop-tb-section-head" id="pop-tb-tools-h">
-                  <span class="pop-tb-grid-title">Tools</span>
-                  <span class="pop-tb-grid-sub">Pick drawing mode</span>
-                </div>
-                <div class="pop-tb-dd-panel" id="pop-tb-tools-panel" aria-labelledby="pop-tb-tools-h">
-                  <p class="pop-tb-dd-desc" id="pop-tb-tools-desc">Pick what you draw on the canvas next.</p>
-                  <div class="pop-tb-grid pop-tb-grid-tools" role="group" aria-describedby="pop-tb-tools-desc">
-                    <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="select" aria-pressed="true">
-                      <span class="pop-tb-grid-title">Select</span>
-                      <span class="pop-tb-grid-sub">Move and resize</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="rect" aria-pressed="false">
-                      <span class="pop-tb-grid-title">Rectangle</span>
-                      <span class="pop-tb-grid-sub">Filled box</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="ellipse" aria-pressed="false">
-                      <span class="pop-tb-grid-title">Ellipse</span>
-                      <span class="pop-tb-grid-sub">Circle or oval</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="text" aria-pressed="false">
-                      <span class="pop-tb-grid-title">Text</span>
-                      <span class="pop-tb-grid-sub">Place a label</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="image" aria-pressed="false">
-                      <span class="pop-tb-grid-title">Image</span>
-                      <span class="pop-tb-grid-sub">Embed raster</span>
-                    </button>
-                  </div>
-                </div>
-              </section>
-              <section class="pop-tb-section" aria-labelledby="pop-tb-view-h">
-                <div class="pop-tb-section-head" id="pop-tb-view-h">
-                  <span class="pop-tb-grid-title">View</span>
-                  <span class="pop-tb-grid-sub">Zoom and pan</span>
-                </div>
-                <div class="pop-tb-dd-panel" id="pop-tb-view-panel" aria-labelledby="pop-tb-view-h">
-                  <p class="pop-tb-dd-desc">⌘+scroll pans; Ctrl+scroll or pinch zooms. Reset returns to 100% and centered pan.</p>
-                  <div class="pop-tb-grid pop-tb-grid-view" role="group" aria-label="Canvas zoom">
-                    <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
-                    <span class="pop-zoom-pct pop-tb-zoom-readout" id="pop-zoom-pct" aria-live="polite">100%</span>
-                    <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
-                  </div>
-                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Zoom presets">
-                    <button type="button" class="pop-btn" id="pop-zoom-fit" title="Fit entire canvas in view">Fit</button>
-                    <button type="button" class="pop-btn" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset view</button>
-                  </div>
-                </div>
-              </section>
-              <section class="pop-tb-section" aria-labelledby="pop-tb-doc-h">
-                <div class="pop-tb-section-head" id="pop-tb-doc-h">
-                  <span class="pop-tb-grid-title">Document</span>
-                  <span class="pop-tb-grid-sub">Frames and file</span>
-                </div>
-                <div class="pop-tb-dd-panel" id="pop-tb-doc-panel" aria-labelledby="pop-tb-doc-h">
-                  <p class="pop-tb-dd-desc">Frames are sized artboards. Save or load the whole document as JSON.</p>
-                  <label class="pop-tb-style-lbl" for="pop-frame-pick">Active frame</label>
-                  <div class="pop-tb-comp-insert-row">
-                    <select id="pop-frame-pick" class="pop-comp-pick" aria-label="Active frame"></select>
-                    <button type="button" class="pop-btn" id="pop-frame-add" title="Add a new empty frame">+ Frame</button>
-                  </div>
-                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Document file">
-                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-doc-open">
-                      <span class="pop-tb-grid-title">Open</span>
-                      <span class="pop-tb-grid-sub">Load .json</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-primary pop-tb-grid-btn" id="pop-doc-save">
-                      <span class="pop-tb-grid-title">Save</span>
-                      <span class="pop-tb-grid-sub">Download .json</span>
-                    </button>
-                  </div>
-                </div>
-              </section>
-              <section class="pop-tb-section" aria-labelledby="pop-tb-export-h">
-                <div class="pop-tb-section-head" id="pop-tb-export-h">
-                  <span class="pop-tb-grid-title">Export</span>
-                  <span class="pop-tb-grid-sub">SVG and HTML</span>
-                </div>
-                <div class="pop-tb-dd-panel" id="pop-tb-export-panel" aria-labelledby="pop-tb-export-h">
-                  <p class="pop-tb-dd-desc">SVG for vectors; HTML for a web handoff of the active frame (or all frames).</p>
-                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Export SVG">
-                    <button type="button" class="pop-btn pop-primary pop-tb-grid-btn" id="pop-export-sel">
-                      <span class="pop-tb-grid-title">Selection</span>
-                      <span class="pop-tb-grid-sub">SVG of picked layers</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-export-all">
-                      <span class="pop-tb-grid-title">Active frame</span>
-                      <span class="pop-tb-grid-sub">SVG of frame</span>
-                    </button>
-                  </div>
-                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Export HTML">
-                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-export-html">
-                      <span class="pop-tb-grid-title">HTML</span>
-                      <span class="pop-tb-grid-sub">Active frame</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-export-html-all">
-                      <span class="pop-tb-grid-title">HTML all</span>
-                      <span class="pop-tb-grid-sub">Each frame</span>
-                    </button>
-                  </div>
-                </div>
-              </section>
-              <section class="pop-tb-section" aria-labelledby="pop-tb-arrange-h">
-                <div class="pop-tb-section-head" id="pop-tb-arrange-h">
-                  <span class="pop-tb-grid-title">Selection</span>
-                  <span class="pop-tb-grid-sub">Group and order</span>
-                </div>
-                <div class="pop-tb-dd-panel" id="pop-tb-arrange-panel" aria-labelledby="pop-tb-arrange-h">
-                  <p class="pop-tb-dd-desc">Organize the layers you have selected in the list or on the canvas.</p>
-                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Selection actions">
-                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-group" disabled>
-                      <span class="pop-tb-grid-title">Group</span>
-                      <span class="pop-tb-grid-sub">Merge into one folder</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-ungroup" disabled>
-                      <span class="pop-tb-grid-title">Ungroup</span>
-                      <span class="pop-tb-grid-sub">Split one group</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-bring-front" disabled>
-                      <span class="pop-tb-grid-title">Bring to front</span>
-                      <span class="pop-tb-grid-sub">Top of stack</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-send-back" disabled>
-                      <span class="pop-tb-grid-title">Send to back</span>
-                      <span class="pop-tb-grid-sub">Bottom of stack</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-danger pop-tb-grid-btn pop-tb-span2" id="pop-delete" disabled>
-                      <span class="pop-tb-grid-title">Delete</span>
-                      <span class="pop-tb-grid-sub">Remove selected layers</span>
-                    </button>
-                  </div>
-                </div>
-              </section>
-              <section class="pop-tb-section" aria-labelledby="pop-tb-comp-h">
-                <div class="pop-tb-section-head" id="pop-tb-comp-h">
-                  <span class="pop-tb-grid-title">Components</span>
-                  <span class="pop-tb-grid-sub">Symbols and instances</span>
-                </div>
-                <div class="pop-tb-dd-panel pop-tb-comp-panel" id="pop-tb-comp-panel" aria-labelledby="pop-tb-comp-h">
-                  <p class="pop-tb-dd-desc">Reusable symbols and instances.</p>
-                  <button type="button" class="pop-btn pop-primary pop-tb-comp-done" id="pop-comp-done" hidden>
-                    Done editing
-                  </button>
-                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Component actions">
-                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-create-comp" disabled>
-                      <span class="pop-tb-grid-title">Create component</span>
-                      <span class="pop-tb-grid-sub">From selection</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-detach" disabled>
-                      <span class="pop-tb-grid-title">Detach instance</span>
-                      <span class="pop-tb-grid-sub">Edit as raw layers</span>
-                    </button>
-                    <button type="button" class="pop-btn pop-tb-grid-btn pop-tb-span2" id="pop-edit-comp" disabled>
-                      <span class="pop-tb-grid-title">Edit main</span>
-                      <span class="pop-tb-grid-sub">Open component definition</span>
-                    </button>
-                  </div>
-                  <div class="pop-tb-comp-insert">
-                    <span class="pop-tb-style-lbl">Insert instance</span>
-                    <div class="pop-tb-comp-insert-row">
-                      <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
-                      <button type="button" class="pop-btn" id="pop-insert-inst">Place</button>
-                    </div>
-                  </div>
-                </div>
-              </section>
+      <div class="pop-app-chrome">
+        <header class="pop-chrome-titlebar">
+          <div class="pop-chrome-title-cluster">
+            <h1 class="pop-title">POP</h1>
+            <p class="pop-sub" title="Draw on the canvas, add images, then export SVG. Raster images become &lt;image&gt; in the SVG (embedded), not auto-traced.">Shapes, text &amp; images · export SVG/HTML</p>
+          </div>
+        </header>
+        <div class="pop-chrome-ribbon" role="toolbar" aria-label="Editor toolbar">
+          <div class="pop-ribbon-group" aria-labelledby="pop-ribbon-lbl-tools">
+            <div class="pop-ribbon-group-main pop-ribbon-tools-row" id="pop-tb-tools-panel" role="group" aria-label="Drawing tools">
+              <button type="button" class="pop-btn pop-tool pop-ribbon-tool-btn" data-tool="select" aria-pressed="true" title="Move and resize">Select</button>
+              <button type="button" class="pop-btn pop-tool pop-ribbon-tool-btn" data-tool="rect" aria-pressed="false" title="Draw a rectangle">Rectangle</button>
+              <button type="button" class="pop-btn pop-tool pop-ribbon-tool-btn" data-tool="ellipse" aria-pressed="false" title="Draw an ellipse">Ellipse</button>
+              <button type="button" class="pop-btn pop-tool pop-ribbon-tool-btn" data-tool="text" aria-pressed="false" title="Place text">Text</button>
+              <button type="button" class="pop-btn pop-tool pop-ribbon-tool-btn" data-tool="image" aria-pressed="false" title="Embed a raster image">Image</button>
             </div>
-            <input type="file" id="pop-file" accept="image/*" hidden />
-            <input type="file" id="pop-doc-file" accept="application/json,.json" hidden />
+            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-tools">Tools</span>
+          </div>
+          <div class="pop-ribbon-sep" aria-hidden="true"></div>
+          <div class="pop-ribbon-group" aria-labelledby="pop-ribbon-lbl-view">
+            <div class="pop-ribbon-group-main pop-ribbon-view-block" id="pop-tb-view-panel">
+              <div class="pop-ribbon-view-zoom" role="group" aria-label="Canvas zoom">
+                <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
+                <span class="pop-zoom-pct pop-tb-zoom-readout" id="pop-zoom-pct" aria-live="polite">100%</span>
+                <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
+              </div>
+              <button type="button" class="pop-btn" id="pop-zoom-fit" title="Fit entire canvas in view">Fit</button>
+              <button type="button" class="pop-btn" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset</button>
+            </div>
+            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-view">View</span>
+          </div>
+          <div class="pop-ribbon-sep" aria-hidden="true"></div>
+          <div class="pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-doc">
+            <div class="pop-ribbon-group-main pop-ribbon-doc-block" id="pop-tb-doc-panel">
+              <div class="pop-ribbon-doc-frame">
+                <label class="pop-tb-style-lbl" for="pop-frame-pick">Frame</label>
+                <div class="pop-tb-comp-insert-row">
+                  <select id="pop-frame-pick" class="pop-comp-pick" aria-label="Active frame"></select>
+                  <button type="button" class="pop-btn" id="pop-frame-add" title="Add a new empty frame">+</button>
+                </div>
+              </div>
+              <div class="pop-ribbon-doc-file" role="group" aria-label="Document file">
+                <button type="button" class="pop-btn pop-ribbon-file-btn" id="pop-doc-open" title="Load a .json document">Open…</button>
+                <button type="button" class="pop-btn pop-primary pop-ribbon-file-btn" id="pop-doc-save" title="Download document as .json">Save</button>
+              </div>
+            </div>
+            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-doc">File</span>
+          </div>
+          <div class="pop-ribbon-sep" aria-hidden="true"></div>
+          <div class="pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-export">
+            <div class="pop-ribbon-group-main" id="pop-tb-export-panel">
+              <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Export SVG">
+                <button type="button" class="pop-btn pop-primary pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-sel">
+                  <span class="pop-tb-grid-title">Selection</span>
+                  <span class="pop-tb-grid-sub">SVG</span>
+                </button>
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-all">
+                  <span class="pop-tb-grid-title">Frame</span>
+                  <span class="pop-tb-grid-sub">SVG</span>
+                </button>
+              </div>
+              <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Export HTML">
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-html">
+                  <span class="pop-tb-grid-title">HTML</span>
+                  <span class="pop-tb-grid-sub">Frame</span>
+                </button>
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-html-all">
+                  <span class="pop-tb-grid-title">HTML</span>
+                  <span class="pop-tb-grid-sub">All frames</span>
+                </button>
+              </div>
+            </div>
+            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-export">Export</span>
+          </div>
+          <div class="pop-ribbon-sep" aria-hidden="true"></div>
+          <div class="pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-arrange">
+            <div class="pop-ribbon-group-main" id="pop-tb-arrange-panel">
+              <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-arrange-grid" role="group" aria-label="Group and order">
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-group" disabled>
+                  <span class="pop-tb-grid-title">Group</span>
+                </button>
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ungroup" disabled>
+                  <span class="pop-tb-grid-title">Ungroup</span>
+                </button>
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-bring-front" disabled>
+                  <span class="pop-tb-grid-title">Front</span>
+                </button>
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-send-back" disabled>
+                  <span class="pop-tb-grid-title">Back</span>
+                </button>
+                <button type="button" class="pop-btn pop-danger pop-tb-grid-btn pop-ribbon-action-compact pop-tb-span2" id="pop-delete" disabled>
+                  <span class="pop-tb-grid-title">Delete</span>
+                </button>
+              </div>
+            </div>
+            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-arrange">Arrange</span>
+          </div>
+          <div class="pop-ribbon-sep" aria-hidden="true"></div>
+          <div class="pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-comp">
+            <div class="pop-tb-dd-panel pop-tb-comp-panel pop-ribbon-comp-inner" id="pop-tb-comp-panel">
+              <button type="button" class="pop-btn pop-primary pop-tb-comp-done" id="pop-comp-done" hidden>
+                Done editing
+              </button>
+              <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-comp-actions" role="group" aria-label="Components">
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-create-comp" disabled>
+                  <span class="pop-tb-grid-title">Create</span>
+                  <span class="pop-tb-grid-sub">Component</span>
+                </button>
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-detach" disabled>
+                  <span class="pop-tb-grid-title">Detach</span>
+                </button>
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact pop-tb-span2" id="pop-edit-comp" disabled>
+                  <span class="pop-tb-grid-title">Edit main</span>
+                </button>
+              </div>
+              <div class="pop-tb-comp-insert pop-ribbon-comp-insert">
+                <span class="pop-tb-style-lbl">Insert</span>
+                <div class="pop-tb-comp-insert-row">
+                  <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
+                  <button type="button" class="pop-btn" id="pop-insert-inst">Place</button>
+                </div>
+              </div>
+            </div>
+            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-comp">Components</span>
           </div>
         </div>
-        <p class="pop-toolbar-hint" id="pop-toolbar-hint">Toolbar is hidden. Pin it to use tools, zoom, and export.</p>
+        <input type="file" id="pop-file" accept="image/*" hidden />
+        <input type="file" id="pop-doc-file" accept="application/json,.json" hidden />
       </div>
       <div class="pop-main">
         <aside class="pop-layers" aria-label="Layers and properties">
@@ -594,14 +538,6 @@ export function mount(root: HTMLElement): void {
   const selGroupLayout = root.querySelector<HTMLSelectElement>('#pop-group-layout')!
   const inpGroupGap = root.querySelector<HTMLInputElement>('#pop-group-gap')!
   const inpGroupPad = root.querySelector<HTMLInputElement>('#pop-group-pad')!
-  const toolbarWrap = root.querySelector<HTMLElement>('#pop-toolbar-wrap')!
-  const btnToolbarPin = root.querySelector<HTMLButtonElement>('#pop-toolbar-pin')!
-  const toolbarExpanded = root.querySelector<HTMLElement>('#pop-toolbar-expanded')!
-  const toolbarHint = root.querySelector<HTMLElement>('#pop-toolbar-hint')!
-
-  /** Pinned unless user chose to hide (`'0'` in storage). */
-  let toolbarPinned = localStorage.getItem(TOOLBAR_PIN_STORAGE_KEY) !== '0'
-
   function updateFillSwatch(): void {
     fillSwatch.style.backgroundColor = fillInput.value
     fillSwatch.title = `Fill: ${fillInput.value}`
@@ -740,28 +676,6 @@ export function mount(root: HTMLElement): void {
     },
     true,
   )
-
-  function applyToolbarPinState(): void {
-    toolbarExpanded.hidden = !toolbarPinned
-    toolbarHint.hidden = toolbarPinned
-    btnToolbarPin.setAttribute('aria-pressed', String(toolbarPinned))
-    btnToolbarPin.setAttribute('aria-expanded', String(toolbarPinned))
-    toolbarWrap.classList.toggle('pop-toolbar-pinned', toolbarPinned)
-    const pinLabel = toolbarPinned ? 'Unpin toolbar' : 'Pin toolbar'
-    btnToolbarPin.setAttribute('aria-label', pinLabel)
-    btnToolbarPin.setAttribute('title', pinLabel)
-    if (!toolbarPinned) {
-      closeColorPickerPanel()
-    }
-  }
-
-  btnToolbarPin.addEventListener('click', () => {
-    toolbarPinned = !toolbarPinned
-    localStorage.setItem(TOOLBAR_PIN_STORAGE_KEY, toolbarPinned ? '1' : '0')
-    applyToolbarPinState()
-  })
-
-  applyToolbarPinState()
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null
 
