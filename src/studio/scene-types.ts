@@ -12,6 +12,8 @@ export type SceneLeaf =
       fill: string
       stroke: string
       strokeWidth: number
+      rx: number
+      opacity: number
     })
   | (SceneNodeBase & {
       type: 'ellipse'
@@ -22,6 +24,7 @@ export type SceneLeaf =
       fill: string
       stroke: string
       strokeWidth: number
+      opacity: number
     })
   | (SceneNodeBase & {
       type: 'text'
@@ -32,6 +35,7 @@ export type SceneLeaf =
       content: string
       fontSize: number
       fill: string
+      opacity: number
     })
   | (SceneNodeBase & {
       type: 'image'
@@ -40,6 +44,7 @@ export type SceneLeaf =
       width: number
       height: number
       href: string
+      opacity: number
     })
 
 export type SceneGroup = SceneNodeBase & {

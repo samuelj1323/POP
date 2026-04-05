@@ -31,7 +31,14 @@ import {
 
 const TOOLBAR_PIN_STORAGE_KEY = 'pop-toolbar-pinned'
 import type { PersistedStateV1, PersistedStateV2 } from './studio/persistence.ts'
-import type { ComponentDefinition, DefNode, SceneGroup, SceneNode, Tool } from './studio/scene-types.ts'
+import type {
+  ComponentDefinition,
+  DefNode,
+  SceneGroup,
+  SceneLeaf,
+  SceneNode,
+  Tool,
+} from './studio/scene-types.ts'
 import { collectSnapTargetsX, collectSnapTargetsY, snapAxis } from './studio/snap.ts'
 import {
   buildSvgFragmentLeafLocal,
@@ -61,6 +68,9 @@ export function mount(root: HTMLElement): void {
   let defaultStrokeWidth = 2
   let symmetryGuidesOn = true
   let propsPanelFocused = false
+  let stylePanelFocused = false
+  let defaultOpacity = 1
+  let defaultRx = 0
   let lastSnapHint: string | null = null
   let viewTx = 0
   let viewTy = 0
@@ -150,46 +160,6 @@ export function mount(root: HTMLElement): void {
               </div>
             </div>
             <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-style-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-style-panel">Style</button>
-              <div class="pop-tb-dd-panel pop-tb-style-panel" id="pop-tb-style-panel" role="region" aria-labelledby="pop-tb-style-btn" hidden>
-                <p class="pop-tb-dd-desc">Defaults for new shapes; also updates selected rectangles, ellipses, and text.</p>
-                <div class="pop-tb-style-grid">
-                  <div class="pop-tb-style-block">
-                    <span class="pop-tb-style-lbl">Fill</span>
-                    <div class="pop-color-picker">
-                      <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
-                      <input type="color" class="pop-color-native" id="pop-fill" value="#3b82f6" tabindex="-1" />
-                      <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
-                        <div class="pop-color-panel-cap">Theme colors</div>
-                        <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
-                        <div class="pop-color-panel-cap">Standard colors</div>
-                        <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
-                        <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="pop-tb-style-block">
-                    <span class="pop-tb-style-lbl">Stroke</span>
-                    <div class="pop-color-picker">
-                      <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
-                      <input type="color" class="pop-color-native" id="pop-stroke" value="#1e3a5f" tabindex="-1" />
-                      <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
-                        <div class="pop-color-panel-cap">Theme colors</div>
-                        <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
-                        <div class="pop-color-panel-cap">Standard colors</div>
-                        <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
-                        <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
-                      </div>
-                    </div>
-                  </div>
-                  <label class="pop-tb-style-block pop-tb-stroke-w">
-                    <span class="pop-tb-style-lbl">Stroke width</span>
-                    <input type="range" id="pop-stroke-w" min="0" max="12" value="2" aria-label="Stroke width" />
-                  </label>
-                </div>
-              </div>
-            </div>
-            <div class="pop-tb-dd" data-pop-tb-dd>
               <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-export-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-export-panel">Export</button>
               <div class="pop-tb-dd-panel" id="pop-tb-export-panel" role="region" aria-labelledby="pop-tb-export-btn" hidden>
                 <p class="pop-tb-dd-desc">Save SVG to your device.</p>
@@ -255,14 +225,14 @@ export function mount(root: HTMLElement): void {
             <input type="file" id="pop-file" accept="image/*" hidden />
           </div>
         </div>
-        <p class="pop-toolbar-hint" id="pop-toolbar-hint">Toolbar is hidden. Pin it to use tools, zoom, colors, and export.</p>
+        <p class="pop-toolbar-hint" id="pop-toolbar-hint">Toolbar is hidden. Pin it to use tools, zoom, and export.</p>
       </div>
       <div class="pop-comp-banner" id="pop-comp-banner" hidden>
         <span id="pop-comp-banner-text"></span>
         <button type="button" class="pop-btn pop-primary" id="pop-comp-done">Done editing</button>
       </div>
       <div class="pop-main">
-        <aside class="pop-layers" aria-label="Layers and transform">
+        <aside class="pop-layers" aria-label="Layers, transform, and style">
           <div class="pop-layer-aside-head">
             <div class="pop-layer-tabs" role="tablist" aria-label="Layer panel">
               <button type="button" class="pop-layer-tab pop-layer-tab-active" role="tab" id="pop-tab-layers" aria-selected="true" aria-controls="pop-layers-tree-panel">Layers</button>
@@ -287,6 +257,56 @@ export function mount(root: HTMLElement): void {
               <label class="pop-field" id="pop-ph-wrap"><span class="pop-field-lbl">H</span><input type="number" id="pop-ph" class="pop-num" step="1" min="1" disabled /></label>
             </div>
             <label class="pop-field pop-field-fs" id="pop-fs-wrap"><span class="pop-field-lbl">Font size</span><input type="number" id="pop-pfs" class="pop-num" step="1" min="4" max="400" disabled /></label>
+          </div>
+          <div class="pop-props pop-style-section">
+            <h2>Style</h2>
+            <p class="pop-style-section-desc">Defaults for new shapes when nothing is selected; otherwise updates the current selection.</p>
+            <div class="pop-tb-style-grid">
+              <div class="pop-tb-style-block" id="pop-fill-style-block">
+                <span class="pop-tb-style-lbl">Fill</span>
+                <div class="pop-color-picker">
+                  <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
+                  <input type="color" class="pop-color-native" id="pop-fill" value="#3b82f6" tabindex="-1" />
+                  <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
+                    <div class="pop-color-panel-cap">Theme colors</div>
+                    <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
+                    <div class="pop-color-panel-cap">Standard colors</div>
+                    <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
+                    <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
+                  </div>
+                </div>
+              </div>
+              <div id="pop-stroke-style-blocks">
+                <div class="pop-tb-style-block">
+                  <span class="pop-tb-style-lbl">Stroke</span>
+                  <div class="pop-color-picker">
+                    <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
+                    <input type="color" class="pop-color-native" id="pop-stroke" value="#1e3a5f" tabindex="-1" />
+                    <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
+                      <div class="pop-color-panel-cap">Theme colors</div>
+                      <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
+                      <div class="pop-color-panel-cap">Standard colors</div>
+                      <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
+                      <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
+                    </div>
+                  </div>
+                </div>
+                <label class="pop-tb-style-block pop-tb-stroke-w">
+                  <span class="pop-tb-style-lbl">Stroke width</span>
+                  <input type="range" id="pop-stroke-w" min="0" max="12" value="2" aria-label="Stroke width" />
+                </label>
+              </div>
+              <label class="pop-tb-style-block pop-tb-opacity">
+                <span class="pop-tb-style-lbl">Opacity</span>
+                <input type="range" id="pop-opacity" min="0" max="100" value="100" aria-label="Opacity" />
+              </label>
+              <label class="pop-tb-style-block pop-tb-rx" id="pop-rx-wrap">
+                <span class="pop-tb-style-lbl">Corner radius</span>
+                <input type="range" id="pop-rx" min="0" max="80" value="0" aria-label="Corner radius" />
+              </label>
+            </div>
+          </div>
+          <div class="pop-props">
             <div class="pop-symmetry">
               <label class="pop-check"><input type="checkbox" id="pop-guides" checked /><span>Symmetry guides &amp; snap</span></label>
               <p class="pop-hint" id="pop-sym-hint"></p>
@@ -368,6 +388,12 @@ export function mount(root: HTMLElement): void {
   const strokeStandardHost = root.querySelector<HTMLElement>('#pop-stroke-standard')!
   const fillMoreBtn = root.querySelector<HTMLButtonElement>('#pop-fill-more')!
   const strokeMoreBtn = root.querySelector<HTMLButtonElement>('#pop-stroke-more')!
+  const opacityInput = root.querySelector<HTMLInputElement>('#pop-opacity')!
+  const rxInput = root.querySelector<HTMLInputElement>('#pop-rx')!
+  const strokeStyleBlocks = root.querySelector<HTMLElement>('#pop-stroke-style-blocks')!
+  const fillStyleBlock = root.querySelector<HTMLElement>('#pop-fill-style-block')!
+  const rxWrap = root.querySelector<HTMLElement>('#pop-rx-wrap')!
+  const styleSection = root.querySelector<HTMLElement>('.pop-style-section')!
   const btnZoomIn = root.querySelector<HTMLButtonElement>('#pop-zoom-in')!
   const btnZoomOut = root.querySelector<HTMLButtonElement>('#pop-zoom-out')!
   const btnZoomReset = root.querySelector<HTMLButtonElement>('#pop-zoom-reset')!
@@ -781,10 +807,10 @@ export function mount(root: HTMLElement): void {
     if (rawV2) {
       const data = JSON.parse(rawV2) as Partial<PersistedStateV2>
       if (data.v === 2 && data.nodes && typeof data.nodes === 'object' && Array.isArray(data.rootIds)) {
-        nodes = recordToNodes(data.nodes as Record<string, SceneNode>)
+        nodes = recordToNodes(data.nodes as Record<string, unknown>)
         rootIds = data.rootIds.filter((id) => nodes.has(id))
         if (data.definitions && typeof data.definitions === 'object') {
-          definitions = recordToDefs(data.definitions as Record<string, ComponentDefinition>)
+          definitions = recordToDefs(data.definitions as Record<string, unknown>)
         }
         if (data.layerNames && typeof data.layerNames === 'object') {
           layerNames = { ...data.layerNames }
@@ -844,6 +870,95 @@ export function mount(root: HTMLElement): void {
   function readNum(el: HTMLInputElement): number | null {
     const v = parseFloat(el.value)
     return Number.isFinite(v) ? v : null
+  }
+
+  function clampRectCornerRadius(it: SceneNode): void {
+    if (it.type !== 'rect') return
+    const maxR = Math.min(it.width, it.height) / 2
+    it.rx = Math.max(0, Math.min(it.rx, maxR))
+  }
+
+  function syncStyleFromSelection(): void {
+    const n = selected.size
+    const sel = [...selected]
+
+    const anyFillTarget =
+      n === 0 || sel.some((id) => ['rect', 'ellipse', 'text'].includes(getNode(id)?.type ?? ''))
+    const anyStrokeTarget =
+      n === 0 || sel.some((id) => ['rect', 'ellipse'].includes(getNode(id)?.type ?? ''))
+    const anyOpacityTarget =
+      n === 0 ||
+      sel.some((id) => ['rect', 'ellipse', 'text', 'image'].includes(getNode(id)?.type ?? ''))
+    const anyRect = n === 0 || sel.some((id) => getNode(id)?.type === 'rect')
+
+    fillInput.disabled = n > 0 && !anyFillTarget
+    fillSwatch.disabled = fillInput.disabled
+    fillStyleBlock.style.opacity = n > 0 && !anyFillTarget ? '0.45' : ''
+
+    strokeStyleBlocks.hidden = n > 0 && !anyStrokeTarget
+    strokeInput.disabled = n > 0 && !anyStrokeTarget
+    strokeWInput.disabled = n > 0 && !anyStrokeTarget
+    strokeSwatch.disabled = strokeInput.disabled
+
+    opacityInput.disabled = n > 0 && !anyOpacityTarget
+    rxWrap.style.display = anyRect ? '' : 'none'
+    rxInput.disabled = n > 0 && !anyRect
+
+    if (n === 0) {
+      fillInput.value = defaultFill
+      strokeInput.value = defaultStroke
+      strokeWInput.value = String(defaultStrokeWidth)
+      opacityInput.value = String(Math.round(defaultOpacity * 100))
+      rxInput.value = String(Math.round(defaultRx))
+      updateBothSwatches()
+      return
+    }
+
+    const fillIds = sel.filter((id) => ['rect', 'ellipse', 'text'].includes(getNode(id)?.type ?? ''))
+    if (fillIds.length > 0) {
+      const hexes = fillIds.map((id) => normalizeHex6((getNode(id) as { fill: string }).fill))
+      const first = hexes[0]!
+      fillInput.value = first
+      fillSwatch.title = hexes.every((h) => h === first) ? `Fill: ${first}` : `Mixed fills (${first} shown)`
+      updateFillSwatch()
+    }
+
+    const strokeIds = sel.filter((id) => ['rect', 'ellipse'].includes(getNode(id)?.type ?? ''))
+    if (!strokeStyleBlocks.hidden && strokeIds.length > 0) {
+      const strokes = strokeIds.map((id) => normalizeHex6((getNode(id) as { stroke: string }).stroke))
+      const sw = strokeIds.map((id) => (getNode(id) as { strokeWidth: number }).strokeWidth)
+      const s0 = strokes[0]!
+      strokeInput.value = s0
+      strokeSwatch.title = strokes.every((s) => s === s0) ? `Stroke: ${s0}` : `Mixed strokes (${s0} shown)`
+      updateStrokeSwatch()
+      if (sw.every((w) => w === sw[0])) strokeWInput.value = String(sw[0])
+      else strokeWInput.value = String(sw[0])
+    }
+
+    const opLeaves = sel
+      .map((id) => getNode(id))
+      .filter(
+        (it): it is SceneLeaf =>
+          !!it && (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text' || it.type === 'image'),
+      )
+    if (opLeaves.length > 0) {
+      const ops = opLeaves.map((it) => it.opacity)
+      const o0 = ops[0]!
+      opacityInput.value = String(Math.round(o0 * 100))
+      if (!ops.every((o) => o === o0)) opacityInput.title = 'Mixed opacity (first shown)'
+      else opacityInput.title = 'Opacity'
+    }
+
+    const rects = sel
+      .map((id) => getNode(id))
+      .filter((it): it is SceneNode & { type: 'rect' } => it?.type === 'rect')
+    if (rects.length > 0) {
+      const rxs = rects.map((r) => r.rx)
+      const r0 = rxs[0]!
+      rxInput.value = String(Math.round(r0))
+      if (!rxs.every((r) => r === r0)) rxInput.title = 'Mixed corner radius (first shown)'
+      else rxInput.title = 'Corner radius'
+    }
   }
 
   function syncPropsFromSelection(): void {
@@ -929,6 +1044,10 @@ export function mount(root: HTMLElement): void {
         c.fontSize = clamp(Math.round(c.fontSize * Math.min(sx, sy)), 4, 400)
         c.height = c.fontSize
       }
+      if (c.type === 'rect') {
+        const factor = Math.min(sx, sy)
+        c.rx = stripNum(Math.min(c.rx * factor, c.width / 2, c.height / 2))
+      }
       if (c.type === 'group') {
         scaleGroupChildren(cid, sx, sy)
       }
@@ -974,6 +1093,7 @@ export function mount(root: HTMLElement): void {
         const ph = readNum(inpH)
         if (pw !== null) it.width = Math.max(1, pw)
         if (ph !== null) it.height = Math.max(1, ph)
+        if (it.type === 'rect') clampRectCornerRadius(it)
       }
     } else {
       const pw = readNum(inpW)
@@ -988,6 +1108,7 @@ export function mount(root: HTMLElement): void {
             it.width = nw
           } else if (it && it.type !== 'text') {
             it.width = Math.max(1, pw)
+            if (it.type === 'rect') clampRectCornerRadius(it)
           }
         }
       }
@@ -1001,6 +1122,7 @@ export function mount(root: HTMLElement): void {
             it.height = nh
           } else if (it && it.type !== 'text') {
             it.height = Math.max(1, ph)
+            if (it.type === 'rect') clampRectCornerRadius(it)
           }
         }
       }
@@ -1066,9 +1188,21 @@ export function mount(root: HTMLElement): void {
     el.addEventListener('blur', () => {
       propsPanelFocused = false
       syncPropsFromSelection()
+      if (!stylePanelFocused) syncStyleFromSelection()
     })
     el.addEventListener('input', () => applyTransformFromInputs())
   }
+
+  styleSection.addEventListener('focusin', () => {
+    stylePanelFocused = true
+  })
+  styleSection.addEventListener('focusout', (e) => {
+    const rt = e.relatedTarget as Node | null
+    if (rt && styleSection.contains(rt)) return
+    if (rt && (fillPanel.contains(rt) || strokePanel.contains(rt))) return
+    stylePanelFocused = false
+    syncStyleFromSelection()
+  })
 
   guidesCheckbox.addEventListener('change', () => {
     symmetryGuidesOn = guidesCheckbox.checked
@@ -1086,6 +1220,8 @@ export function mount(root: HTMLElement): void {
     defaultFill = fillInput.value
     defaultStroke = strokeInput.value
     defaultStrokeWidth = Number(strokeWInput.value)
+    defaultOpacity = clamp(Number(opacityInput.value) / 100, 0, 1)
+    defaultRx = Math.max(0, Number(rxInput.value))
   }
 
   function setTool(next: Tool): void {
@@ -1177,6 +1313,55 @@ export function mount(root: HTMLElement): void {
       c = nodes.get(c)?.parentId ?? null
     }
     return chain.reverse()
+  }
+
+  function setLayersAsideTab(tab: 'layers' | 'parent'): void {
+    layersAsideTab = tab
+    const layersOn = tab === 'layers'
+    tabLayersBtn.classList.toggle('pop-layer-tab-active', layersOn)
+    tabLayersBtn.setAttribute('aria-selected', String(layersOn))
+    tabParentBtn.classList.toggle('pop-layer-tab-active', !layersOn)
+    tabParentBtn.setAttribute('aria-selected', String(!layersOn))
+    layersTreePanel.hidden = !layersOn
+    layersParentPanel.hidden = layersOn
+    if (!layersOn) renderParentPanel()
+  }
+
+  function renderParentPanel(): void {
+    parentChainEl.replaceChildren()
+    const prim = primarySelectionId()
+    if (!prim) {
+      parentPanelDesc.textContent = 'Select a layer to see its parent chain.'
+      btnSelectSiblings.disabled = true
+      return
+    }
+    btnSelectSiblings.disabled = false
+    const chain = ancestorChainOrdered(prim)
+    parentPanelDesc.textContent =
+      chain.length > 1
+        ? 'Root to selection — click a row to select that layer.'
+        : 'This layer is at the root of the tree.'
+    for (const cid of chain) {
+      const item = getNode(cid)
+      if (!item) continue
+      const li = document.createElement('li')
+      li.className = 'pop-parent-crumb'
+      if (selected.has(cid)) li.classList.add('pop-parent-crumb-selected')
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'pop-parent-crumb-btn'
+      btn.textContent = layerNames[cid] ?? itemLabel(item, definitions)
+      btn.addEventListener('click', () => {
+        selected = new Set([cid])
+        updateSelectionUi()
+        syncPropsFromSelection()
+        syncStyleFromSelection()
+        renderHandles()
+        renderParentPanel()
+      })
+      li.appendChild(btn)
+      parentChainEl.appendChild(li)
+    }
   }
 
   function selectedDeletionRoots(): string[] {
@@ -1406,6 +1591,10 @@ export function mount(root: HTMLElement): void {
     if (n.type === 'text') {
       n.fontSize = clamp(Math.round(n.fontSize * Math.min(sx, sy)), 4, 400)
       n.height = n.fontSize
+    }
+    if (n.type === 'rect') {
+      const factor = Math.min(sx, sy)
+      n.rx = stripNum(Math.min(n.rx * factor, n.width / 2, n.height / 2))
     }
     if (n.type === 'group') {
       for (const cid of n.childIds) {
@@ -1643,7 +1832,7 @@ export function mount(root: HTMLElement): void {
     closeColorPickerPanel()
     mainNodesBackup = new Map(nodes)
     mainRootIdsBackup = [...rootIds]
-    nodes = recordToNodes({ ...d.nodes } as Record<string, SceneNode>)
+    nodes = recordToNodes({ ...d.nodes } as Record<string, unknown>)
     rootIds = [d.rootId]
     editingComponentId = compId
     selected.clear()
@@ -1877,6 +2066,7 @@ export function mount(root: HTMLElement): void {
         selected = new Set([id])
         updateSelectionUi()
         syncPropsFromSelection()
+        syncStyleFromSelection()
         renderHandles()
       })
       input.addEventListener('input', () => {
@@ -1957,6 +2147,7 @@ export function mount(root: HTMLElement): void {
         }
         updateSelectionUi()
         syncPropsFromSelection()
+        syncStyleFromSelection()
         renderHandles()
       })
 
@@ -2167,6 +2358,7 @@ export function mount(root: HTMLElement): void {
     renderLayers()
     renderStaticGuides()
     if (!propsPanelFocused) syncPropsFromSelection()
+    if (!stylePanelFocused) syncStyleFromSelection()
     schedulePersist()
   }
 
@@ -2273,6 +2465,31 @@ export function mount(root: HTMLElement): void {
     commit()
   })
 
+  opacityInput.addEventListener('input', () => {
+    syncChromeFromInputs()
+    const o = defaultOpacity
+    for (const id of selected) {
+      const it = getNode(id)
+      if (it && (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text' || it.type === 'image')) {
+        it.opacity = o
+      }
+    }
+    commit()
+  })
+
+  rxInput.addEventListener('input', () => {
+    syncChromeFromInputs()
+    const want = defaultRx
+    for (const id of selected) {
+      const it = getNode(id)
+      if (it?.type === 'rect') {
+        it.rx = want
+        clampRectCornerRadius(it)
+      }
+    }
+    commit()
+  })
+
   btnDelete.addEventListener('click', () => {
     deleteNodesSubtrees(selectedDeletionRoots())
     selected.clear()
@@ -2317,6 +2534,7 @@ ${parts}
     selected = new Set(siblingListForParent(p))
     updateSelectionUi()
     syncPropsFromSelection()
+    syncStyleFromSelection()
     renderHandles()
   })
 
@@ -2347,6 +2565,7 @@ ${parts}
           width: w,
           height: h,
           href,
+          opacity: defaultOpacity,
         })
         rootIds.push(nid)
         selected = new Set([nid])
@@ -2400,6 +2619,7 @@ ${parts}
         }
         updateSelectionUi()
         syncPropsFromSelection()
+        syncStyleFromSelection()
         renderHandles()
         dragState.active = true
         dragState.pointerId = ev.pointerId
@@ -2416,6 +2636,7 @@ ${parts}
         if (!additiveMultiSelect(ev)) selected.clear()
         updateSelectionUi()
         syncPropsFromSelection()
+        syncStyleFromSelection()
         renderHandles()
       }
       return
@@ -2440,7 +2661,10 @@ ${parts}
         fill: defaultFill,
         stroke: defaultStroke,
         strokeWidth: defaultStrokeWidth,
+        rx: defaultRx,
+        opacity: defaultOpacity,
       })
+      clampRectCornerRadius(nodes.get(nid)!)
       rootIds.push(nid)
       selected = new Set([nid])
       setTool('select')
@@ -2459,6 +2683,7 @@ ${parts}
         fill: defaultFill,
         stroke: defaultStroke,
         strokeWidth: defaultStrokeWidth,
+        opacity: defaultOpacity,
       })
       rootIds.push(nid)
       selected = new Set([nid])
@@ -2479,6 +2704,7 @@ ${parts}
         content,
         fontSize,
         fill: defaultFill,
+        opacity: defaultOpacity,
       })
       rootIds.push(nid)
       selected = new Set([nid])
@@ -2506,9 +2732,11 @@ ${parts}
         const ratio = Math.min(out.width / sw, out.height / sh)
         it.fontSize = clamp(Math.round(resizeState.startFontSize * ratio), 4, 400)
       }
+      if (it.type === 'rect') clampRectCornerRadius(it)
       renderItems()
       renderHandles()
       if (!propsPanelFocused) syncPropsFromSelection()
+      if (!stylePanelFocused) syncStyleFromSelection()
       return
     }
 
@@ -2572,6 +2800,7 @@ ${parts}
       renderHandles()
       renderLayers()
       if (!propsPanelFocused) syncPropsFromSelection()
+      if (!stylePanelFocused) syncStyleFromSelection()
       schedulePersist()
       return
     }
@@ -2592,6 +2821,7 @@ ${parts}
     renderLayers()
     renderHandles()
     if (!propsPanelFocused) syncPropsFromSelection()
+    if (!stylePanelFocused) syncStyleFromSelection()
     schedulePersist()
   })
 
@@ -2604,6 +2834,7 @@ ${parts}
       renderHandles()
       renderLayers()
       if (!propsPanelFocused) syncPropsFromSelection()
+      if (!stylePanelFocused) syncStyleFromSelection()
       schedulePersist()
       return
     }
@@ -2617,6 +2848,7 @@ ${parts}
       renderLayers()
       renderHandles()
       if (!propsPanelFocused) syncPropsFromSelection()
+      if (!stylePanelFocused) syncStyleFromSelection()
       schedulePersist()
     }
   })

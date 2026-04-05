@@ -8,6 +8,24 @@ export function escapeXml(s: string): string {
     .replace(/"/g, '&quot;')
 }
 
+function svgNum(n: number): string {
+  return String(Math.round(n * 1000) / 1000)
+}
+
+function opacityAttr(opacity: number): string {
+  if (opacity >= 1) return ''
+  const t = Math.round(opacity * 1000) / 1000
+  return ` opacity="${t}"`
+}
+
+function rectCornerAttrs(rx: number, width: number, height: number): string {
+  const maxR = Math.min(width, height) / 2
+  const r = Math.max(0, Math.min(rx, maxR))
+  if (r <= 0) return ''
+  const s = svgNum(r)
+  return ` rx="${s}" ry="${s}"`
+}
+
 export function itemLabel(item: SceneNode, definitions: Map<string, ComponentDefinition>): string {
   switch (item.type) {
     case 'rect':
@@ -30,18 +48,18 @@ export function itemLabel(item: SceneNode, definitions: Map<string, ComponentDef
 export function buildSvgFragmentLeaf(item: SceneLeaf): string {
   switch (item.type) {
     case 'rect':
-      return `<rect x="${item.x}" y="${item.y}" width="${item.width}" height="${item.height}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${item.strokeWidth}"/>`
+      return `<rect x="${svgNum(item.x)}" y="${svgNum(item.y)}" width="${svgNum(item.width)}" height="${svgNum(item.height)}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${svgNum(item.strokeWidth)}"${rectCornerAttrs(item.rx, item.width, item.height)}${opacityAttr(item.opacity)}/>`
     case 'ellipse': {
       const cx = item.x + item.width / 2
       const cy = item.y + item.height / 2
       const rx = item.width / 2
       const ry = item.height / 2
-      return `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${item.strokeWidth}"/>`
+      return `<ellipse cx="${svgNum(cx)}" cy="${svgNum(cy)}" rx="${svgNum(rx)}" ry="${svgNum(ry)}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${svgNum(item.strokeWidth)}"${opacityAttr(item.opacity)}/>`
     }
     case 'text':
-      return `<text x="${item.x}" y="${item.y + item.fontSize}" font-size="${item.fontSize}" font-family="system-ui, sans-serif" fill="${escapeXml(item.fill)}">${escapeXml(item.content)}</text>`
+      return `<text x="${svgNum(item.x)}" y="${svgNum(item.y + item.fontSize)}" font-size="${svgNum(item.fontSize)}" font-family="system-ui, sans-serif" fill="${escapeXml(item.fill)}"${opacityAttr(item.opacity)}>${escapeXml(item.content)}</text>`
     case 'image':
-      return `<image href="${escapeXml(item.href)}" x="${item.x}" y="${item.y}" width="${item.width}" height="${item.height}" preserveAspectRatio="none"/>`
+      return `<image href="${escapeXml(item.href)}" x="${svgNum(item.x)}" y="${svgNum(item.y)}" width="${svgNum(item.width)}" height="${svgNum(item.height)}" preserveAspectRatio="none"${opacityAttr(item.opacity)}/>`
   }
 }
 
@@ -49,16 +67,16 @@ export function buildSvgFragmentLeaf(item: SceneLeaf): string {
 export function buildSvgFragmentLeafLocal(item: SceneLeaf): string {
   switch (item.type) {
     case 'rect':
-      return `<rect x="0" y="0" width="${item.width}" height="${item.height}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${item.strokeWidth}"/>`
+      return `<rect x="0" y="0" width="${svgNum(item.width)}" height="${svgNum(item.height)}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${svgNum(item.strokeWidth)}"${rectCornerAttrs(item.rx, item.width, item.height)}${opacityAttr(item.opacity)}/>`
     case 'ellipse': {
       const rx = item.width / 2
       const ry = item.height / 2
-      return `<ellipse cx="${rx}" cy="${ry}" rx="${rx}" ry="${ry}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${item.strokeWidth}"/>`
+      return `<ellipse cx="${svgNum(rx)}" cy="${svgNum(ry)}" rx="${svgNum(rx)}" ry="${svgNum(ry)}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${svgNum(item.strokeWidth)}"${opacityAttr(item.opacity)}/>`
     }
     case 'text':
-      return `<text x="0" y="${item.fontSize}" font-size="${item.fontSize}" font-family="system-ui, sans-serif" fill="${escapeXml(item.fill)}">${escapeXml(item.content)}</text>`
+      return `<text x="0" y="${svgNum(item.fontSize)}" font-size="${svgNum(item.fontSize)}" font-family="system-ui, sans-serif" fill="${escapeXml(item.fill)}"${opacityAttr(item.opacity)}>${escapeXml(item.content)}</text>`
     case 'image':
-      return `<image href="${escapeXml(item.href)}" x="0" y="0" width="${item.width}" height="${item.height}" preserveAspectRatio="none"/>`
+      return `<image href="${escapeXml(item.href)}" x="0" y="0" width="${svgNum(item.width)}" height="${svgNum(item.height)}" preserveAspectRatio="none"${opacityAttr(item.opacity)}/>`
   }
 }
 
