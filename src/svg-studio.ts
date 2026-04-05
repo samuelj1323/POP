@@ -1,718 +1,46 @@
-const VIEW_W = 960
-const VIEW_H = 540
-const SNAP_PX = 8
+import { buildExcelThemeGrid, EXCEL_STANDARD_COLORS, normalizeHex6 } from './studio/color-palette.ts'
+import {
+  MAX_VIEW_SCALE,
+  MIN_ITEM_SIZE,
+  MIN_VIEW_SCALE,
+  SNAP_PX,
+  VIEW_H,
+  VIEW_W,
+} from './studio/constants.ts'
+import { newId } from './studio/id.ts'
+import {
+  applyResizeHandle,
+  collectSubtreeIds,
+  HANDLE_CURSORS,
+  isDescendant,
+  unionBoundsWorld,
+  worldFrame,
+} from './studio/layout-geometry.ts'
+import type { ResizeHandleId } from './studio/layout-geometry.ts'
+import { clamp } from './studio/math.ts'
+import {
+  defsToRecord,
+  isValidCanvasItem,
+  migrateV1ToScene,
+  nodesToRecord,
+  recordToDefs,
+  recordToNodes,
+  STORAGE_KEY_V1,
+  STORAGE_KEY_V2,
+} from './studio/persistence.ts'
 
-type Tool = 'select' | 'rect' | 'ellipse' | 'text' | 'image'
-
-type SceneNodeBase = { id: string; parentId: string | null }
-
-type SceneLeaf =
-  | (SceneNodeBase & {
-      type: 'rect'
-      x: number
-      y: number
-      width: number
-      height: number
-      fill: string
-      stroke: string
-      strokeWidth: number
-    })
-  | (SceneNodeBase & {
-      type: 'ellipse'
-      x: number
-      y: number
-      width: number
-      height: number
-      fill: string
-      stroke: string
-      strokeWidth: number
-    })
-  | (SceneNodeBase & {
-      type: 'text'
-      x: number
-      y: number
-      width: number
-      height: number
-      content: string
-      fontSize: number
-      fill: string
-    })
-  | (SceneNodeBase & {
-      type: 'image'
-      x: number
-      y: number
-      width: number
-      height: number
-      href: string
-    })
-
-type SceneGroup = SceneNodeBase & {
-  type: 'group'
-  x: number
-  y: number
-  width: number
-  height: number
-  childIds: string[]
-}
-
-type SceneInstance = SceneNodeBase & {
-  type: 'instance'
-  componentId: string
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
-type SceneNode = SceneLeaf | SceneGroup | SceneInstance
-
-type DefNode = Exclude<SceneNode, { type: 'instance' }>
-
-type ComponentDefinition = {
-  id: string
-  name: string
-  rootId: string
-  intrinsicW: number
-  intrinsicH: number
-  nodes: Record<string, DefNode>
-}
-
-/** Legacy flat canvas item (persist v1 only). */
-type CanvasItem =
-  | {
-      id: string
-      type: 'rect'
-      x: number
-      y: number
-      width: number
-      height: number
-      fill: string
-      stroke: string
-      strokeWidth: number
-    }
-  | {
-      id: string
-      type: 'ellipse'
-      x: number
-      y: number
-      width: number
-      height: number
-      fill: string
-      stroke: string
-      strokeWidth: number
-    }
-  | {
-      id: string
-      type: 'text'
-      x: number
-      y: number
-      width: number
-      height: number
-      content: string
-      fontSize: number
-      fill: string
-    }
-  | {
-      id: string
-      type: 'image'
-      x: number
-      y: number
-      width: number
-      height: number
-      href: string
-    }
-
-function clamp(n: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, n))
-}
-
-/** Normalize to #rrggbb for `<input type="color">` and SVG. */
-function normalizeHex6(hex: string): string {
-  let h = hex.trim()
-  if (!h.startsWith('#')) h = `#${h}`
-  h = h.slice(1)
-  if (h.length === 3) {
-    h = h[0]! + h[0]! + h[1]! + h[1]! + h[2]! + h[2]!
-  }
-  if (h.length !== 6) return '#000000'
-  const n = parseInt(h, 16)
-  if (!Number.isFinite(n)) return '#000000'
-  return `#${n.toString(16).padStart(6, '0')}`
-}
-
-function parseRgbHex(hex: string): { r: number; g: number; b: number } {
-  const h = normalizeHex6(hex).slice(1)
-  const n = parseInt(h, 16)
-  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 }
-}
-
-function rgbToHex(r: number, g: number, b: number): string {
-  const c = (x: number) => clamp(Math.round(x), 0, 255).toString(16).padStart(2, '0')
-  return `#${c(r)}${c(g)}${c(b)}`
-}
-
-function mixRgb(
-  a: { r: number; g: number; b: number },
-  b: { r: number; g: number; b: number },
-  t: number,
-): { r: number; g: number; b: number } {
-  return {
-    r: a.r + (b.r - a.r) * t,
-    g: a.g + (b.g - a.g) * t,
-    b: a.b + (b.b - a.b) * t,
-  }
-}
-
-/** Grayscale column + tinted columns, similar to Excel’s “Theme colors” grid. */
-function buildExcelThemeGrid(): string[][] {
-  const grayCol = ['#ffffff', '#f2f2f2', '#d9d9d9', '#bfbfbf', '#a6a6a6', '#7f7f7f']
-  const accentBases = [
-    '#c00000',
-    '#ff6600',
-    '#ffc000',
-    '#92d050',
-    '#00b050',
-    '#00b0f0',
-    '#0070c0',
-    '#002060',
-    '#7030a0',
-  ]
-  const rows = grayCol.length
-  const grid: string[][] = []
-  for (let r = 0; r < rows; r++) {
-    const t = rows === 1 ? 0 : r / (rows - 1)
-    const row: string[] = []
-    for (let c = 0; c < 10; c++) {
-      if (c === 0) {
-        row.push(grayCol[r]!)
-      } else {
-        const base = parseRgbHex(accentBases[c - 1]!)
-        const white = { r: 255, g: 255, b: 255 }
-        const tinted = mixRgb(white, base, 0.18 + (1 - t) * 0.72)
-        const shaded = mixRgb(tinted, { r: 18, g: 18, b: 18 }, t * 0.52)
-        row.push(rgbToHex(shaded.r, shaded.g, shaded.b))
-      }
-    }
-    grid.push(row)
-  }
-  return grid
-}
-
-/** Excel-style “Standard colors” row (common fills). */
-const EXCEL_STANDARD_COLORS = [
-  '#000000',
-  '#ffffff',
-  '#c00000',
-  '#ff0000',
-  '#ffc000',
-  '#ffff00',
-  '#92d050',
-  '#00b050',
-  '#00b0f0',
-  '#0070c0',
-]
-
-const MIN_ITEM_SIZE = 8
-
-const MIN_VIEW_SCALE = 0.25
-const MAX_VIEW_SCALE = 4
-
-type ResizeHandleId = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
-
-function bboxFromOpposingCorners(
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-): { x: number; y: number; width: number; height: number } {
-  const x1 = Math.min(ax, bx)
-  const x2 = Math.max(ax, bx)
-  const y1 = Math.min(ay, by)
-  const y2 = Math.max(ay, by)
-  return {
-    x: x1,
-    y: y1,
-    width: Math.max(MIN_ITEM_SIZE, x2 - x1),
-    height: Math.max(MIN_ITEM_SIZE, y2 - y1),
-  }
-}
-
-function applyResizeHandle(
-  handle: ResizeHandleId,
-  mx: number,
-  my: number,
-  s: { x: number; y: number; width: number; height: number },
-): { x: number; y: number; width: number; height: number } {
-  const x0 = s.x
-  const y0 = s.y
-  const w0 = s.width
-  const h0 = s.height
-  const r = x0 + w0
-  const b = y0 + h0
-  switch (handle) {
-    case 'se':
-      return bboxFromOpposingCorners(x0, y0, mx, my)
-    case 'nw':
-      return bboxFromOpposingCorners(r, b, mx, my)
-    case 'ne':
-      return bboxFromOpposingCorners(x0, b, mx, my)
-    case 'sw':
-      return bboxFromOpposingCorners(r, y0, mx, my)
-    case 'e':
-      return { x: x0, y: y0, width: Math.max(MIN_ITEM_SIZE, mx - x0), height: h0 }
-    case 'w': {
-      const nx = Math.min(mx, r - MIN_ITEM_SIZE)
-      return { x: nx, y: y0, width: Math.max(MIN_ITEM_SIZE, r - nx), height: h0 }
-    }
-    case 's':
-      return { x: x0, y: y0, width: w0, height: Math.max(MIN_ITEM_SIZE, my - y0) }
-    case 'n': {
-      const ny = Math.min(my, b - MIN_ITEM_SIZE)
-      return { x: x0, y: ny, width: w0, height: Math.max(MIN_ITEM_SIZE, b - ny) }
-    }
-  }
-}
-
-const HANDLE_CURSORS: Record<ResizeHandleId, string> = {
-  nw: 'nwse-resize',
-  n: 'ns-resize',
-  ne: 'nesw-resize',
-  e: 'ew-resize',
-  se: 'nwse-resize',
-  s: 'ns-resize',
-  sw: 'nesw-resize',
-  w: 'ew-resize',
-}
-
-function worldFrame(
-  nodes: Map<string, SceneNode>,
-  definitions: Map<string, ComponentDefinition>,
-  id: string,
-): { x: number; y: number; width: number; height: number } | null {
-  const n = nodes.get(id)
-  if (!n) return null
-  let ox = 0
-  let oy = 0
-  let cur: string | null = id
-  const chain: SceneNode[] = []
-  while (cur) {
-    const node = nodes.get(cur)
-    if (!node) break
-    chain.unshift(node)
-    cur = node.parentId
-  }
-  for (const node of chain) {
-    ox += node.x
-    oy += node.y
-  }
-  return { x: ox, y: oy, width: n.width, height: n.height }
-}
-
-function collectSubtreeIds(nodes: Map<string, SceneNode>, rootId: string): Set<string> {
-  const out = new Set<string>()
-  const walk = (id: string): void => {
-    if (out.has(id)) return
-    out.add(id)
-    const n = nodes.get(id)
-    if (n?.type === 'group') {
-      for (const c of n.childIds) walk(c)
-    }
-  }
-  walk(rootId)
-  return out
-}
-
-function isDescendant(nodes: Map<string, SceneNode>, ancestorId: string, nodeId: string): boolean {
-  let cur: string | null = nodeId
-  while (cur) {
-    if (cur === ancestorId) return true
-    cur = nodes.get(cur)?.parentId ?? null
-  }
-  return false
-}
-
-function unionBoundsWorld(
-  ids: Iterable<string>,
-  nodes: Map<string, SceneNode>,
-  definitions: Map<string, ComponentDefinition>,
-): { left: number; right: number; top: number; bottom: number; cx: number; cy: number } | null {
-  let left = Infinity
-  let right = -Infinity
-  let top = Infinity
-  let bottom = -Infinity
-  for (const id of ids) {
-    const f = worldFrame(nodes, definitions, id)
-    if (!f) continue
-    left = Math.min(left, f.x)
-    right = Math.max(right, f.x + f.width)
-    top = Math.min(top, f.y)
-    bottom = Math.max(bottom, f.y + f.height)
-  }
-  if (!Number.isFinite(left)) return null
-  return {
-    left,
-    right,
-    top,
-    bottom,
-    cx: (left + right) / 2,
-    cy: (top + bottom) / 2,
-  }
-}
-
-function collectSnapTargetsX(
-  exclude: Set<string>,
-  nodes: Map<string, SceneNode>,
-  definitions: Map<string, ComponentDefinition>,
-): number[] {
-  const t = new Set<number>()
-  t.add(0)
-  t.add(VIEW_W / 2)
-  t.add(VIEW_W)
-  for (const n of nodes.values()) {
-    if (exclude.has(n.id)) continue
-    const f = worldFrame(nodes, definitions, n.id)
-    if (!f) continue
-    t.add(f.x)
-    t.add(f.x + f.width / 2)
-    t.add(f.x + f.width)
-  }
-  return [...t]
-}
-
-function collectSnapTargetsY(
-  exclude: Set<string>,
-  nodes: Map<string, SceneNode>,
-  definitions: Map<string, ComponentDefinition>,
-): number[] {
-  const t = new Set<number>()
-  t.add(0)
-  t.add(VIEW_H / 2)
-  t.add(VIEW_H)
-  for (const n of nodes.values()) {
-    if (exclude.has(n.id)) continue
-    const f = worldFrame(nodes, definitions, n.id)
-    if (!f) continue
-    t.add(f.y)
-    t.add(f.y + f.height / 2)
-    t.add(f.y + f.height)
-  }
-  return [...t]
-}
-
-/** Best 1D snap: align left, center, or right (or top, mid, bottom) to targets. */
-function snapAxis(
-  axis: 'x' | 'y',
-  a0: number,
-  aMid: number,
-  a1: number,
-  targets: number[],
-  maxDist: number,
-): { delta: number; guide: number | null; label: string | null } {
-  const centerLine = axis === 'x' ? VIEW_W / 2 : VIEW_H / 2
-  const spanMax = axis === 'x' ? VIEW_W : VIEW_H
-  let best = { dist: maxDist + 1, delta: 0, guide: null as number | null, label: null as string | null }
-  const tries: { val: number; kind: 'edge' | 'center' }[] = [
-    { val: a0, kind: 'edge' },
-    { val: aMid, kind: 'center' },
-    { val: a1, kind: 'edge' },
-  ]
-  for (const tx of targets) {
-    for (const { val, kind } of tries) {
-      const delta = tx - val
-      const ad = Math.abs(delta)
-      if (ad <= maxDist && ad < best.dist) {
-        const onCanvasMid = tx === centerLine
-        const onCanvasEdge = tx === 0 || tx === spanMax
-        let label: string | null = null
-        if (onCanvasMid) {
-          label = kind === 'center' ? 'Symmetric: aligned to canvas center' : 'Symmetric: edge to center line'
-        } else if (onCanvasEdge) {
-          label = 'Aligned to canvas edge'
-        } else {
-          label = kind === 'center' ? 'Aligned to layer center' : 'Aligned to layer edge'
-        }
-        best = { dist: ad, delta, guide: tx, label }
-      }
-    }
-  }
-  if (best.dist <= maxDist) return { delta: best.delta, guide: best.guide, label: best.label }
-  return { delta: 0, guide: null, label: null }
-}
-
-function newId(): string {
-  return crypto.randomUUID()
-}
-
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-function itemLabel(item: SceneNode, definitions: Map<string, ComponentDefinition>): string {
-  switch (item.type) {
-    case 'rect':
-      return 'Rectangle'
-    case 'ellipse':
-      return 'Ellipse'
-    case 'text':
-      return item.content.slice(0, 24) || 'Text'
-    case 'image':
-      return 'Image'
-    case 'group':
-      return 'Group'
-    case 'instance': {
-      const d = definitions.get(item.componentId)
-      return d ? `Instance · ${d.name}` : 'Instance'
-    }
-  }
-}
-
-function buildSvgFragmentLeaf(item: SceneLeaf): string {
-  switch (item.type) {
-    case 'rect':
-      return `<rect x="${item.x}" y="${item.y}" width="${item.width}" height="${item.height}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${item.strokeWidth}"/>`
-    case 'ellipse': {
-      const cx = item.x + item.width / 2
-      const cy = item.y + item.height / 2
-      const rx = item.width / 2
-      const ry = item.height / 2
-      return `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${item.strokeWidth}"/>`
-    }
-    case 'text':
-      return `<text x="${item.x}" y="${item.y + item.fontSize}" font-size="${item.fontSize}" font-family="system-ui, sans-serif" fill="${escapeXml(item.fill)}">${escapeXml(item.content)}</text>`
-    case 'image':
-      return `<image href="${escapeXml(item.href)}" x="${item.x}" y="${item.y}" width="${item.width}" height="${item.height}" preserveAspectRatio="none"/>`
-  }
-}
-
-function serializeDefSubtreeSvg(def: ComponentDefinition, id: string, indent: string): string {
-  const n = def.nodes[id]
-  if (!n) return ''
-  if (n.type === 'group') {
-    const inner = n.childIds.map((cid) => serializeDefSubtreeSvg(def, cid, `${indent}  `)).join('\n')
-    return `${indent}<g transform="translate(${n.x} ${n.y})">\n${inner}\n${indent}</g>`
-  }
-  return `${indent}${buildSvgFragmentLeaf(n)}`
-}
-
-function serializeSceneSubtreeSvg(
-  nodes: Map<string, SceneNode>,
-  definitions: Map<string, ComponentDefinition>,
-  id: string,
-  indent: string,
-): string {
-  const n = nodes.get(id)
-  if (!n) return ''
-  if (n.type === 'group') {
-    const inner = n.childIds
-      .map((cid) => serializeSceneSubtreeSvg(nodes, definitions, cid, `${indent}  `))
-      .join('\n')
-    return `${indent}<g transform="translate(${n.x} ${n.y})">\n${inner}\n${indent}</g>`
-  }
-  if (n.type === 'instance') {
-    const def = definitions.get(n.componentId)
-    if (!def) return ''
-    const sx = n.width / Math.max(1e-6, def.intrinsicW)
-    const sy = n.height / Math.max(1e-6, def.intrinsicH)
-    const inner = serializeDefSubtreeSvg(def, def.rootId, `${indent}  `)
-    return `${indent}<g transform="translate(${n.x} ${n.y}) scale(${sx} ${sy})">\n${inner}\n${indent}</g>`
-  }
-  return `${indent}${buildSvgFragmentLeaf(n)}`
-}
-
-function serializeSvgFromRoots(
-  rootIds: string[],
-  nodes: Map<string, SceneNode>,
-  definitions: Map<string, ComponentDefinition>,
-  w: number,
-  h: number,
-): string {
-  const body = rootIds.map((rid) => serializeSceneSubtreeSvg(nodes, definitions, rid, '  ')).join('\n')
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
-${body}
-</svg>
-`
-}
-
-function downloadSvg(svg: string, filename: string): void {
-  const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.rel = 'noopener'
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-const STORAGE_KEY_V2 = 'pop-studio-state-v2'
-const STORAGE_KEY_V1 = 'pop-studio-state-v1'
-
-type PersistedStateV1 = {
-  v: 1
-  items: CanvasItem[]
-  layerNames: Record<string, string>
-  defaultFill: string
-  defaultStroke: string
-  defaultStrokeWidth: number
-  symmetryGuidesOn: boolean
-  viewTx?: number
-  viewTy?: number
-  viewScale?: number
-}
-
-type PersistedStateV2 = {
-  v: 2
-  rootIds: string[]
-  nodes: Record<string, SceneNode>
-  layerNames: Record<string, string>
-  definitions: Record<string, ComponentDefinition>
-  defaultFill: string
-  defaultStroke: string
-  defaultStrokeWidth: number
-  symmetryGuidesOn: boolean
-  viewTx?: number
-  viewTy?: number
-  viewScale?: number
-  editingComponentId?: string | null
-}
-
-function isValidCanvasItem(x: unknown): x is CanvasItem {
-  if (!x || typeof x !== 'object') return false
-  const o = x as Record<string, unknown>
-  if (typeof o.id !== 'string' || typeof o.type !== 'string') return false
-  const n = (k: string) => typeof o[k] === 'number'
-  const s = (k: string) => typeof o[k] === 'string'
-  switch (o.type) {
-    case 'rect':
-    case 'ellipse':
-      return (
-        n('x') &&
-        n('y') &&
-        n('width') &&
-        n('height') &&
-        s('fill') &&
-        s('stroke') &&
-        typeof o.strokeWidth === 'number'
-      )
-    case 'text':
-      return n('x') && n('y') && n('width') && n('height') && s('content') && n('fontSize') && s('fill')
-    case 'image':
-      return n('x') && n('y') && n('width') && n('height') && s('href')
-    default:
-      return false
-  }
-}
-
-function isValidSceneNode(x: unknown): x is SceneNode {
-  if (!x || typeof x !== 'object') return false
-  const o = x as Record<string, unknown>
-  if (typeof o.id !== 'string' || typeof o.type !== 'string') return false
-  const n = (k: string) => typeof o[k] === 'number'
-  const s = (k: string) => typeof o[k] === 'string'
-  const parentOk = o.parentId === null || typeof o.parentId === 'string'
-  if (!parentOk) return false
-  switch (o.type) {
-    case 'group':
-      return (
-        n('x') &&
-        n('y') &&
-        n('width') &&
-        n('height') &&
-        Array.isArray(o.childIds) &&
-        (o.childIds as unknown[]).every((c) => typeof c === 'string')
-      )
-    case 'instance':
-      return n('x') && n('y') && n('width') && n('height') && s('componentId')
-    case 'rect':
-    case 'ellipse':
-      return (
-        n('x') &&
-        n('y') &&
-        n('width') &&
-        n('height') &&
-        s('fill') &&
-        s('stroke') &&
-        typeof o.strokeWidth === 'number'
-      )
-    case 'text':
-      return n('x') && n('y') && n('width') && n('height') && s('content') && n('fontSize') && s('fill')
-    case 'image':
-      return n('x') && n('y') && n('width') && n('height') && s('href')
-    default:
-      return false
-  }
-}
-
-function isValidDefNode(x: unknown): x is DefNode {
-  return isValidSceneNode(x) && (x as SceneNode).type !== 'instance'
-}
-
-function isValidComponentDefinition(x: unknown): x is ComponentDefinition {
-  if (!x || typeof x !== 'object') return false
-  const o = x as Record<string, unknown>
-  if (typeof o.id !== 'string' || typeof o.name !== 'string') return false
-  if (typeof o.rootId !== 'string') return false
-  if (typeof o.intrinsicW !== 'number' || typeof o.intrinsicH !== 'number') return false
-  if (!o.nodes || typeof o.nodes !== 'object') return false
-  const nodes = o.nodes as Record<string, unknown>
-  for (const k of Object.keys(nodes)) {
-    if (!isValidDefNode(nodes[k])) return false
-  }
-  return true
-}
-
-function migrateV1ToScene(items: CanvasItem[]): { rootIds: string[]; nodes: Map<string, SceneNode> } {
-  const nodes = new Map<string, SceneNode>()
-  const rootIds = items.map((it) => {
-    const base = { id: it.id, parentId: null as string | null }
-    if (it.type === 'rect') {
-      nodes.set(it.id, { ...base, ...it })
-    } else if (it.type === 'ellipse') {
-      nodes.set(it.id, { ...base, ...it })
-    } else if (it.type === 'text') {
-      nodes.set(it.id, { ...base, ...it })
-    } else {
-      nodes.set(it.id, { ...base, ...it })
-    }
-    return it.id
-  })
-  return { rootIds, nodes }
-}
-
-function recordToNodes(r: Record<string, SceneNode>): Map<string, SceneNode> {
-  const m = new Map<string, SceneNode>()
-  for (const k of Object.keys(r)) {
-    const n = r[k]
-    if (n && isValidSceneNode(n)) m.set(k, n)
-  }
-  return m
-}
-
-function nodesToRecord(nodes: Map<string, SceneNode>): Record<string, SceneNode> {
-  const r: Record<string, SceneNode> = {}
-  for (const [k, v] of nodes) r[k] = v
-  return r
-}
-
-function recordToDefs(r: Record<string, ComponentDefinition>): Map<string, ComponentDefinition> {
-  const m = new Map<string, ComponentDefinition>()
-  for (const k of Object.keys(r)) {
-    const d = r[k]
-    if (d && isValidComponentDefinition(d)) m.set(k, d)
-  }
-  return m
-}
-
-function defsToRecord(defs: Map<string, ComponentDefinition>): Record<string, ComponentDefinition> {
-  const r: Record<string, ComponentDefinition> = {}
-  for (const [k, v] of defs) r[k] = v
-  return r
-}
+const TOOLBAR_PIN_STORAGE_KEY = 'pop-toolbar-pinned'
+import type { PersistedStateV1, PersistedStateV2 } from './studio/persistence.ts'
+import type { ComponentDefinition, DefNode, SceneGroup, SceneNode, Tool } from './studio/scene-types.ts'
+import { collectSnapTargetsX, collectSnapTargetsY, snapAxis } from './studio/snap.ts'
+import {
+  buildSvgFragmentLeafLocal,
+  downloadSvg,
+  itemLabel,
+  serializeDefSubtreeSvg,
+  serializeSceneSubtreeSvg,
+  serializeSvgFromRoots,
+} from './studio/svg-export.ts'
 
 export function mount(root: HTMLElement): void {
   let rootIds: string[] = []
@@ -725,6 +53,8 @@ export function mount(root: HTMLElement): void {
   /** Custom layer names by item id; when missing, UI falls back to `itemLabel`. */
   let layerNames: Record<string, string> = {}
   let selected = new Set<string>()
+  /** Left sidebar: layer tree vs parent-chain helper (Figma-style hierarchy). */
+  let layersAsideTab: 'layers' | 'parent' = 'layers'
   let tool: Tool = 'select'
   let defaultFill = '#3b82f6'
   let defaultStroke = '#1e3a5f'
@@ -772,70 +102,160 @@ export function mount(root: HTMLElement): void {
         <h1 class="pop-title">Pop</h1>
         <p class="pop-sub">Draw on the canvas, add images, then export SVG. Raster images become <code>&lt;image&gt;</code> in the SVG (embedded), not auto-traced vectors.</p>
       </header>
-      <div class="pop-toolbar">
-        <span class="pop-label">Tool</span>
-        <div class="pop-tools" role="group" aria-label="Tools">
-          <button type="button" class="pop-btn pop-tool" data-tool="select" aria-pressed="true">Select</button>
-          <button type="button" class="pop-btn pop-tool" data-tool="rect" aria-pressed="false">Rectangle</button>
-          <button type="button" class="pop-btn pop-tool" data-tool="ellipse" aria-pressed="false">Ellipse</button>
-          <button type="button" class="pop-btn pop-tool" data-tool="text" aria-pressed="false">Text</button>
-          <button type="button" class="pop-btn pop-tool" data-tool="image" aria-pressed="false">Image</button>
-        </div>
-        <span class="pop-sep"></span>
-        <span class="pop-label">Zoom</span>
-        <div class="pop-zoom" role="group" aria-label="Canvas zoom">
-          <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
-          <span class="pop-zoom-pct" id="pop-zoom-pct" aria-live="polite">100%</span>
-          <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
-          <button type="button" class="pop-btn" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset view</button>
-        </div>
-        <span class="pop-sep"></span>
-        <div class="pop-color-field">
-          <span class="pop-color-field-lbl">Fill</span>
-          <div class="pop-color-picker">
-            <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
-            <input type="color" class="pop-color-native" id="pop-fill" value="#3b82f6" tabindex="-1" />
-            <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
-              <div class="pop-color-panel-cap">Theme colors</div>
-              <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
-              <div class="pop-color-panel-cap">Standard colors</div>
-              <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
-              <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
+      <div class="pop-toolbar-wrap" id="pop-toolbar-wrap">
+        <div class="pop-toolbar-bar">
+          <button type="button" class="pop-btn pop-toolbar-pin" id="pop-toolbar-pin" aria-pressed="false" aria-expanded="false" aria-controls="pop-toolbar-expanded">
+            <span class="pop-toolbar-pin-glyph" aria-hidden="true">📌</span>
+            <span class="pop-toolbar-pin-label">Pin toolbar</span>
+          </button>
+          <div class="pop-toolbar-expanded" id="pop-toolbar-expanded" role="toolbar" aria-label="Studio tools" hidden>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-tools-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-tools-panel">Tools</button>
+              <div class="pop-tb-dd-panel" id="pop-tb-tools-panel" role="region" aria-labelledby="pop-tb-tools-btn" hidden>
+                <p class="pop-tb-dd-desc" id="pop-tb-tools-desc">Pick what you draw on the canvas next.</p>
+                <div class="pop-tb-grid pop-tb-grid-tools" role="group" aria-describedby="pop-tb-tools-desc">
+                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="select" aria-pressed="true">
+                    <span class="pop-tb-grid-title">Select</span>
+                    <span class="pop-tb-grid-sub">Move and resize</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="rect" aria-pressed="false">
+                    <span class="pop-tb-grid-title">Rectangle</span>
+                    <span class="pop-tb-grid-sub">Filled box</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="ellipse" aria-pressed="false">
+                    <span class="pop-tb-grid-title">Ellipse</span>
+                    <span class="pop-tb-grid-sub">Circle or oval</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="text" aria-pressed="false">
+                    <span class="pop-tb-grid-title">Text</span>
+                    <span class="pop-tb-grid-sub">Place a label</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="image" aria-pressed="false">
+                    <span class="pop-tb-grid-title">Image</span>
+                    <span class="pop-tb-grid-sub">Embed raster</span>
+                  </button>
+                </div>
+              </div>
             </div>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-view-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-view-panel">View</button>
+              <div class="pop-tb-dd-panel" id="pop-tb-view-panel" role="region" aria-labelledby="pop-tb-view-btn" hidden>
+                <p class="pop-tb-dd-desc">Zoom the canvas; reset returns to 100% and centered pan.</p>
+                <div class="pop-tb-grid pop-tb-grid-view" role="group" aria-label="Canvas zoom">
+                  <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
+                  <span class="pop-zoom-pct pop-tb-zoom-readout" id="pop-zoom-pct" aria-live="polite">100%</span>
+                  <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
+                  <button type="button" class="pop-btn pop-tb-span2" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset view</button>
+                </div>
+              </div>
+            </div>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-style-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-style-panel">Style</button>
+              <div class="pop-tb-dd-panel pop-tb-style-panel" id="pop-tb-style-panel" role="region" aria-labelledby="pop-tb-style-btn" hidden>
+                <p class="pop-tb-dd-desc">Defaults for new shapes; also updates selected rectangles, ellipses, and text.</p>
+                <div class="pop-tb-style-grid">
+                  <div class="pop-tb-style-block">
+                    <span class="pop-tb-style-lbl">Fill</span>
+                    <div class="pop-color-picker">
+                      <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
+                      <input type="color" class="pop-color-native" id="pop-fill" value="#3b82f6" tabindex="-1" />
+                      <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
+                        <div class="pop-color-panel-cap">Theme colors</div>
+                        <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
+                        <div class="pop-color-panel-cap">Standard colors</div>
+                        <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
+                        <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="pop-tb-style-block">
+                    <span class="pop-tb-style-lbl">Stroke</span>
+                    <div class="pop-color-picker">
+                      <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
+                      <input type="color" class="pop-color-native" id="pop-stroke" value="#1e3a5f" tabindex="-1" />
+                      <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
+                        <div class="pop-color-panel-cap">Theme colors</div>
+                        <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
+                        <div class="pop-color-panel-cap">Standard colors</div>
+                        <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
+                        <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
+                      </div>
+                    </div>
+                  </div>
+                  <label class="pop-tb-style-block pop-tb-stroke-w">
+                    <span class="pop-tb-style-lbl">Stroke width</span>
+                    <input type="range" id="pop-stroke-w" min="0" max="12" value="2" aria-label="Stroke width" />
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-export-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-export-panel">Export</button>
+              <div class="pop-tb-dd-panel" id="pop-tb-export-panel" role="region" aria-labelledby="pop-tb-export-btn" hidden>
+                <p class="pop-tb-dd-desc">Save SVG to your device.</p>
+                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Export">
+                  <button type="button" class="pop-btn pop-primary pop-tb-grid-btn" id="pop-export-sel">
+                    <span class="pop-tb-grid-title">Selection</span>
+                    <span class="pop-tb-grid-sub">SVG of picked layers</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-export-all">
+                    <span class="pop-tb-grid-title">Full canvas</span>
+                    <span class="pop-tb-grid-sub">Everything on the artboard</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-arrange-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-arrange-panel">Selection</button>
+              <div class="pop-tb-dd-panel" id="pop-tb-arrange-panel" role="region" aria-labelledby="pop-tb-arrange-btn" hidden>
+                <p class="pop-tb-dd-desc">Organize the layers you have selected in the list or on the canvas.</p>
+                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Selection actions">
+                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-group" disabled>
+                    <span class="pop-tb-grid-title">Group</span>
+                    <span class="pop-tb-grid-sub">Merge into one folder</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-ungroup" disabled>
+                    <span class="pop-tb-grid-title">Ungroup</span>
+                    <span class="pop-tb-grid-sub">Split one group</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-danger pop-tb-grid-btn pop-tb-span2" id="pop-delete" disabled>
+                    <span class="pop-tb-grid-title">Delete</span>
+                    <span class="pop-tb-grid-sub">Remove selected layers</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-comp-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-comp-panel">Components</button>
+              <div class="pop-tb-dd-panel pop-tb-comp-panel" id="pop-tb-comp-panel" role="region" aria-labelledby="pop-tb-comp-btn" hidden>
+                <p class="pop-tb-dd-desc">Reusable symbols and instances.</p>
+                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Component actions">
+                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-create-comp" disabled>
+                    <span class="pop-tb-grid-title">Create component</span>
+                    <span class="pop-tb-grid-sub">From selection</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-detach" disabled>
+                    <span class="pop-tb-grid-title">Detach instance</span>
+                    <span class="pop-tb-grid-sub">Edit as raw layers</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tb-grid-btn pop-tb-span2" id="pop-edit-comp" disabled>
+                    <span class="pop-tb-grid-title">Edit main</span>
+                    <span class="pop-tb-grid-sub">Open component definition</span>
+                  </button>
+                </div>
+                <div class="pop-tb-comp-insert">
+                  <span class="pop-tb-style-lbl">Insert instance</span>
+                  <div class="pop-tb-comp-insert-row">
+                    <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
+                    <button type="button" class="pop-btn" id="pop-insert-inst">Place</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <input type="file" id="pop-file" accept="image/*" hidden />
           </div>
         </div>
-        <div class="pop-color-field">
-          <span class="pop-color-field-lbl">Stroke</span>
-          <div class="pop-color-picker">
-            <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
-            <input type="color" class="pop-color-native" id="pop-stroke" value="#1e3a5f" tabindex="-1" />
-            <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
-              <div class="pop-color-panel-cap">Theme colors</div>
-              <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
-              <div class="pop-color-panel-cap">Standard colors</div>
-              <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
-              <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
-            </div>
-          </div>
-        </div>
-        <label class="pop-stroke-w">Width <input type="range" id="pop-stroke-w" min="0" max="12" value="2"/></label>
-        <span class="pop-sep"></span>
-        <button type="button" class="pop-btn pop-primary" id="pop-export-sel">Download selected as SVG</button>
-        <button type="button" class="pop-btn" id="pop-export-all">Download full canvas</button>
-        <button type="button" class="pop-btn pop-danger" id="pop-delete" disabled>Delete</button>
-        <span class="pop-sep"></span>
-        <button type="button" class="pop-btn" id="pop-group" disabled>Group</button>
-        <button type="button" class="pop-btn" id="pop-ungroup" disabled>Ungroup</button>
-        <span class="pop-sep"></span>
-        <button type="button" class="pop-btn" id="pop-create-comp" disabled>Create component</button>
-        <button type="button" class="pop-btn" id="pop-detach" disabled>Detach instance</button>
-        <button type="button" class="pop-btn" id="pop-edit-comp" disabled>Edit main</button>
-        <label class="pop-comp-insert">
-          <span class="pop-label">Insert</span>
-          <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
-          <button type="button" class="pop-btn" id="pop-insert-inst">Instance</button>
-        </label>
-        <input type="file" id="pop-file" accept="image/*" hidden />
+        <p class="pop-toolbar-hint" id="pop-toolbar-hint">Toolbar is hidden. Pin it to use tools, zoom, colors, and export.</p>
       </div>
       <div class="pop-comp-banner" id="pop-comp-banner" hidden>
         <span id="pop-comp-banner-text"></span>
@@ -843,8 +263,21 @@ export function mount(root: HTMLElement): void {
       </div>
       <div class="pop-main">
         <aside class="pop-layers" aria-label="Layers and transform">
-          <h2>Layers</h2>
-          <ul class="pop-layer-list" id="pop-layers" data-pop-layer-tree></ul>
+          <div class="pop-layer-aside-head">
+            <div class="pop-layer-tabs" role="tablist" aria-label="Layer panel">
+              <button type="button" class="pop-layer-tab pop-layer-tab-active" role="tab" id="pop-tab-layers" aria-selected="true" aria-controls="pop-layers-tree-panel">Layers</button>
+              <button type="button" class="pop-layer-tab" role="tab" id="pop-tab-parent" aria-selected="false" aria-controls="pop-layers-parent-panel">Parent</button>
+            </div>
+            <p class="pop-layer-aside-hint">Drag a row to reorder or nest (lower half nests). ⌘ or Ctrl+click to multi-select.</p>
+          </div>
+          <div id="pop-layers-tree-panel" class="pop-layer-tab-panel" role="tabpanel" aria-labelledby="pop-tab-layers">
+            <ul class="pop-layer-list" id="pop-layers" data-pop-layer-tree></ul>
+          </div>
+          <div id="pop-layers-parent-panel" class="pop-layer-tab-panel" hidden role="tabpanel" aria-labelledby="pop-tab-parent">
+            <p class="pop-parent-panel-desc" id="pop-parent-panel-desc">Select a layer to see its parent chain.</p>
+            <ol class="pop-parent-chain" id="pop-parent-chain" aria-label="Parent chain from root to selection"></ol>
+            <button type="button" class="pop-btn pop-btn-block" id="pop-select-siblings" disabled>Select all siblings</button>
+          </div>
           <div class="pop-props">
             <h2>Transform</h2>
             <div class="pop-prop-grid" id="pop-prop-grid">
@@ -887,6 +320,13 @@ export function mount(root: HTMLElement): void {
   const itemsG = root.querySelector<SVGGElement>('#pop-items')!
   const handlesG = root.querySelector<SVGGElement>('#pop-handles')!
   const layerList = root.querySelector<HTMLUListElement>('#pop-layers')!
+  const tabLayersBtn = root.querySelector<HTMLButtonElement>('#pop-tab-layers')!
+  const tabParentBtn = root.querySelector<HTMLButtonElement>('#pop-tab-parent')!
+  const layersTreePanel = root.querySelector<HTMLElement>('#pop-layers-tree-panel')!
+  const layersParentPanel = root.querySelector<HTMLElement>('#pop-layers-parent-panel')!
+  const parentPanelDesc = root.querySelector<HTMLParagraphElement>('#pop-parent-panel-desc')!
+  const parentChainEl = root.querySelector<HTMLOListElement>('#pop-parent-chain')!
+  const btnSelectSiblings = root.querySelector<HTMLButtonElement>('#pop-select-siblings')!
   const fileInput = root.querySelector<HTMLInputElement>('#pop-file')!
   const fillInput = root.querySelector<HTMLInputElement>('#pop-fill')!
   const strokeInput = root.querySelector<HTMLInputElement>('#pop-stroke')!
@@ -932,6 +372,22 @@ export function mount(root: HTMLElement): void {
   const btnZoomOut = root.querySelector<HTMLButtonElement>('#pop-zoom-out')!
   const btnZoomReset = root.querySelector<HTMLButtonElement>('#pop-zoom-reset')!
   const elZoomPct = root.querySelector<HTMLElement>('#pop-zoom-pct')!
+  const toolbarWrap = root.querySelector<HTMLElement>('#pop-toolbar-wrap')!
+  const btnToolbarPin = root.querySelector<HTMLButtonElement>('#pop-toolbar-pin')!
+  const toolbarExpanded = root.querySelector<HTMLElement>('#pop-toolbar-expanded')!
+  const toolbarHint = root.querySelector<HTMLElement>('#pop-toolbar-hint')!
+  const pinLabelEl = btnToolbarPin.querySelector<HTMLElement>('.pop-toolbar-pin-label')!
+
+  /** Pinned unless user chose to hide (`'0'` in storage). */
+  let toolbarPinned = localStorage.getItem(TOOLBAR_PIN_STORAGE_KEY) !== '0'
+  let openTbDropdown: { panel: HTMLElement; trigger: HTMLButtonElement } | null = null
+
+  function closeTbDropdown(): void {
+    if (!openTbDropdown) return
+    openTbDropdown.panel.hidden = true
+    openTbDropdown.trigger.setAttribute('aria-expanded', 'false')
+    openTbDropdown = null
+  }
 
   function updateFillSwatch(): void {
     fillSwatch.style.backgroundColor = fillInput.value
@@ -957,6 +413,20 @@ export function mount(root: HTMLElement): void {
     openColorPicker = null
   }
 
+  function panelRectIntersectsBanner(
+    left: number,
+    top: number,
+    pw: number,
+    ph: number,
+  ): boolean {
+    if (compBanner.hidden) return false
+    const br = compBanner.getBoundingClientRect()
+    if (br.width === 0 || br.height === 0) return false
+    const prRight = left + pw
+    const prBottom = top + ph
+    return !(prRight <= br.left || left >= br.right || prBottom <= br.top || top >= br.bottom)
+  }
+
   function positionColorPanel(panel: HTMLElement, swatch: HTMLButtonElement): void {
     panel.style.position = 'fixed'
     panel.style.zIndex = '2000'
@@ -973,8 +443,80 @@ export function mount(root: HTMLElement): void {
     if (top + ph > window.innerHeight - margin) {
       top = Math.max(margin, r.top - ph - margin)
     }
+
+    if (panelRectIntersectsBanner(left, top, pw, ph)) {
+      const above = r.top - ph - margin
+      if (above >= margin && !panelRectIntersectsBanner(left, above, pw, ph)) {
+        top = above
+      } else {
+        const br = compBanner.getBoundingClientRect()
+        const belowBanner = br.bottom + margin
+        if (belowBanner + ph <= window.innerHeight - margin) {
+          top = belowBanner
+        } else if (above >= margin) {
+          top = above
+        }
+      }
+    }
+
     panel.style.left = `${left}px`
     panel.style.top = `${top}px`
+  }
+
+  function positionTbDropdown(panel: HTMLElement, trigger: HTMLElement): void {
+    panel.style.position = 'fixed'
+    panel.style.zIndex = '1999'
+    const r = trigger.getBoundingClientRect()
+    const margin = 8
+    const pw = panel.offsetWidth
+    const ph = panel.offsetHeight
+    let left = r.left
+    let top = r.bottom + margin
+    if (left + pw > window.innerWidth - margin) {
+      left = Math.max(margin, window.innerWidth - pw - margin)
+    }
+    if (left < margin) left = margin
+    if (top + ph > window.innerHeight - margin) {
+      top = Math.max(margin, r.top - ph - margin)
+    }
+
+    if (panelRectIntersectsBanner(left, top, pw, ph)) {
+      const above = r.top - ph - margin
+      if (above >= margin && !panelRectIntersectsBanner(left, above, pw, ph)) {
+        top = above
+      } else {
+        const br = compBanner.getBoundingClientRect()
+        const belowBanner = br.bottom + margin
+        if (belowBanner + ph <= window.innerHeight - margin) {
+          top = belowBanner
+        } else if (above >= margin) {
+          top = above
+        }
+      }
+    }
+
+    panel.style.left = `${left}px`
+    panel.style.top = `${top}px`
+  }
+
+  function openTbDropdownPanel(panel: HTMLElement, trigger: HTMLButtonElement): void {
+    closeColorPickerPanel()
+    closeTbDropdown()
+    panel.hidden = false
+    trigger.setAttribute('aria-expanded', 'true')
+    openTbDropdown = { panel, trigger }
+    requestAnimationFrame(() => {
+      positionTbDropdown(panel, trigger)
+      requestAnimationFrame(() => positionTbDropdown(panel, trigger))
+    })
+  }
+
+  function toggleTbDropdownPanel(panel: HTMLElement, trigger: HTMLButtonElement): void {
+    if (openTbDropdown?.panel === panel) {
+      closeTbDropdown()
+      return
+    }
+    openTbDropdownPanel(panel, trigger)
   }
 
   function toggleColorPickerPanel(panel: HTMLElement, swatch: HTMLButtonElement): void {
@@ -982,6 +524,7 @@ export function mount(root: HTMLElement): void {
       closeColorPickerPanel()
       return
     }
+    closeTbDropdown()
     closeColorPickerPanel()
     panel.hidden = false
     swatch.setAttribute('aria-expanded', 'true')
@@ -1046,8 +589,13 @@ export function mount(root: HTMLElement): void {
   document.addEventListener(
     'pointerdown',
     (ev) => {
-      if (!openColorPicker) return
       const t = ev.target as Node
+      if (openTbDropdown) {
+        if (!openTbDropdown.panel.contains(t) && !openTbDropdown.trigger.contains(t)) {
+          closeTbDropdown()
+        }
+      }
+      if (!openColorPicker) return
       if (openColorPicker.panel.contains(t) || openColorPicker.swatch.contains(t)) return
       closeColorPickerPanel()
     },
@@ -1055,15 +603,75 @@ export function mount(root: HTMLElement): void {
   )
 
   document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape') closeColorPickerPanel()
+    if (ev.key === 'Escape') {
+      closeTbDropdown()
+      closeColorPickerPanel()
+    }
   })
 
-  window.addEventListener('resize', () => closeColorPickerPanel())
+  window.addEventListener('resize', () => {
+    closeTbDropdown()
+    closeColorPickerPanel()
+  })
   window.addEventListener(
     'scroll',
-    () => closeColorPickerPanel(),
+    () => {
+      closeTbDropdown()
+      closeColorPickerPanel()
+    },
     true,
   )
+
+  function applyToolbarPinState(): void {
+    toolbarExpanded.hidden = !toolbarPinned
+    toolbarHint.hidden = toolbarPinned
+    btnToolbarPin.setAttribute('aria-pressed', String(toolbarPinned))
+    btnToolbarPin.setAttribute('aria-expanded', String(toolbarPinned))
+    toolbarWrap.classList.toggle('pop-toolbar-pinned', toolbarPinned)
+    pinLabelEl.textContent = toolbarPinned ? 'Unpin toolbar' : 'Pin toolbar'
+    if (!toolbarPinned) {
+      closeTbDropdown()
+      closeColorPickerPanel()
+    }
+  }
+
+  btnToolbarPin.addEventListener('click', () => {
+    toolbarPinned = !toolbarPinned
+    localStorage.setItem(TOOLBAR_PIN_STORAGE_KEY, toolbarPinned ? '1' : '0')
+    applyToolbarPinState()
+  })
+
+  root.querySelectorAll<HTMLElement>('[data-pop-tb-dd]').forEach((wrap) => {
+    const trigger = wrap.querySelector<HTMLButtonElement>('.pop-tb-dd-trigger')
+    const panel = wrap.querySelector<HTMLElement>('.pop-tb-dd-panel')
+    if (!trigger || !panel) return
+    trigger.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (!toolbarPinned) return
+      toggleTbDropdownPanel(panel, trigger)
+    })
+  })
+
+  toolbarExpanded.addEventListener(
+    'click',
+    (e) => {
+      if (!openTbDropdown) return
+      const hit = e.target as HTMLElement
+      if (hit.closest('.pop-tb-dd-trigger')) return
+      if (hit.closest('.pop-color-panel')) return
+      if (hit.closest('.pop-color-swatch')) return
+      if (hit.closest('input[type="range"]')) return
+      if (hit.closest('select')) return
+      if (!openTbDropdown.panel.contains(hit)) return
+      if (hit.closest('button')) {
+        queueMicrotask(() => closeTbDropdown())
+      }
+    },
+    true,
+  )
+
+  applyToolbarPinState()
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -1114,7 +722,6 @@ export function mount(root: HTMLElement): void {
         viewTx,
         viewTy,
         viewScale,
-        editingComponentId,
       }
       localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(payload))
     } catch {
@@ -1182,8 +789,7 @@ export function mount(root: HTMLElement): void {
         if (data.layerNames && typeof data.layerNames === 'object') {
           layerNames = { ...data.layerNames }
         }
-        editingComponentId =
-          typeof data.editingComponentId === 'string' ? data.editingComponentId : null
+        editingComponentId = null
         const keepIds = new Set(nodes.keys())
         for (const k of Object.keys(layerNames)) {
           if (!keepIds.has(k)) delete layerNames[k]
@@ -1261,7 +867,7 @@ export function mount(root: HTMLElement): void {
     }
 
     if (n === 1) {
-      const it = getItemById([...selected][0]!)!
+      const it = getNode([...selected][0]!)!
       inpX.value = String(stripNum(it.x))
       inpY.value = String(stripNum(it.y))
       if (it.type === 'text') {
@@ -1272,6 +878,14 @@ export function mount(root: HTMLElement): void {
         inpFs.value = String(stripNum(it.fontSize))
         inpW.value = ''
         inpH.value = ''
+      } else if (it.type === 'group' || it.type === 'instance') {
+        inpFs.disabled = true
+        fsWrap.style.display = 'none'
+        pwWrap.style.display = ''
+        phWrap.style.display = ''
+        inpW.value = String(stripNum(it.width))
+        inpH.value = String(stripNum(it.height))
+        inpFs.value = ''
       } else {
         inpFs.disabled = true
         fsWrap.style.display = 'none'
@@ -1291,8 +905,8 @@ export function mount(root: HTMLElement): void {
     inpX.value = ''
     inpY.value = ''
     inpFs.value = ''
-    const ws = [...selected].map((id) => getItemById(id)!.width)
-    const hs = [...selected].map((id) => getItemById(id)!.height)
+    const ws = [...selected].map((id) => getNode(id)!.width)
+    const hs = [...selected].map((id) => getNode(id)!.height)
     inpW.value = ws.every((w) => w === ws[0]) ? String(stripNum(ws[0]!)) : ''
     inpH.value = hs.every((h) => h === hs[0]) ? String(stripNum(hs[0]!)) : ''
   }
@@ -1301,10 +915,30 @@ export function mount(root: HTMLElement): void {
     return Math.round(n * 1000) / 1000
   }
 
+  function scaleGroupChildren(gid: string, sx: number, sy: number): void {
+    const g = nodes.get(gid)
+    if (g?.type !== 'group') return
+    for (const cid of g.childIds) {
+      const c = nodes.get(cid)
+      if (!c) continue
+      c.x *= sx
+      c.y *= sy
+      c.width *= sx
+      c.height *= sy
+      if (c.type === 'text') {
+        c.fontSize = clamp(Math.round(c.fontSize * Math.min(sx, sy)), 4, 400)
+        c.height = c.fontSize
+      }
+      if (c.type === 'group') {
+        scaleGroupChildren(cid, sx, sy)
+      }
+    }
+  }
+
   function applyTransformFromInputs(): void {
     if (selected.size === 0) return
     if (selected.size === 1) {
-      const it = getItemById([...selected][0]!)!
+      const it = getNode([...selected][0]!)!
       const px = readNum(inpX)
       const py = readNum(inpY)
       if (px !== null) it.x = px
@@ -1314,6 +948,26 @@ export function mount(root: HTMLElement): void {
         if (pfs !== null) {
           it.fontSize = clamp(pfs, 4, 400)
           it.height = it.fontSize
+        }
+      } else if (it.type === 'group') {
+        const pw = readNum(inpW)
+        const ph = readNum(inpH)
+        const ow = it.width
+        const oh = it.height
+        if (pw !== null && ph !== null) {
+          const nw = Math.max(1, pw)
+          const nh = Math.max(1, ph)
+          scaleGroupChildren(it.id, nw / ow, nh / oh)
+          it.width = nw
+          it.height = nh
+        } else if (pw !== null) {
+          const nw = Math.max(1, pw)
+          scaleGroupChildren(it.id, nw / ow, 1)
+          it.width = nw
+        } else if (ph !== null) {
+          const nh = Math.max(1, ph)
+          scaleGroupChildren(it.id, 1, nh / oh)
+          it.height = nh
         }
       } else {
         const pw = readNum(inpW)
@@ -1326,14 +980,28 @@ export function mount(root: HTMLElement): void {
       const ph = readNum(inpH)
       if (pw !== null) {
         for (const id of selected) {
-          const it = getItemById(id)
-          if (it) it.width = Math.max(1, pw)
+          const it = getNode(id)
+          if (it && it.type === 'group') {
+            const ow = it.width
+            const nw = Math.max(1, pw)
+            scaleGroupChildren(it.id, nw / ow, 1)
+            it.width = nw
+          } else if (it && it.type !== 'text') {
+            it.width = Math.max(1, pw)
+          }
         }
       }
       if (ph !== null) {
         for (const id of selected) {
-          const it = getItemById(id)
-          if (it) it.height = Math.max(1, ph)
+          const it = getNode(id)
+          if (it && it.type === 'group') {
+            const oh = it.height
+            const nh = Math.max(1, ph)
+            scaleGroupChildren(it.id, 1, nh / oh)
+            it.height = nh
+          } else if (it && it.type !== 'text') {
+            it.height = Math.max(1, ph)
+          }
         }
       }
     }
@@ -1433,6 +1101,7 @@ export function mount(root: HTMLElement): void {
       fileInput.click()
       setTool('select')
     }
+    closeTbDropdown()
     renderHandles()
   }
 
@@ -1470,6 +1139,46 @@ export function mount(root: HTMLElement): void {
     }
   }
 
+  function additiveMultiSelect(ev: MouseEvent | PointerEvent): boolean {
+    return ev.shiftKey || ev.metaKey || ev.ctrlKey
+  }
+
+  /** Depth from root (1 = canvas root). Used to pick a primary node when several are selected. */
+  function depthFromRoot(id: string): number {
+    let d = 0
+    let c: string | null = id
+    while (c) {
+      d++
+      c = nodes.get(c)?.parentId ?? null
+    }
+    return d
+  }
+
+  function primarySelectionId(): string | null {
+    if (selected.size === 0) return null
+    if (selected.size === 1) return [...selected][0]!
+    let best: string | null = null
+    let bestDepth = -1
+    for (const id of selected) {
+      const d = depthFromRoot(id)
+      if (d > bestDepth) {
+        bestDepth = d
+        best = id
+      }
+    }
+    return best
+  }
+
+  function ancestorChainOrdered(id: string): string[] {
+    const chain: string[] = []
+    let c: string | null = id
+    while (c) {
+      chain.push(c)
+      c = nodes.get(c)?.parentId ?? null
+    }
+    return chain.reverse()
+  }
+
   function selectedDeletionRoots(): string[] {
     const sel = [...selected]
     return sel.filter(
@@ -1481,13 +1190,303 @@ export function mount(root: HTMLElement): void {
     for (const id of ids) {
       const n = nodes.get(id)
       if (!n) continue
+      const subtree = collectSubtreeIds(nodes, id)
       removeChildRef(n.parentId, id)
-      for (const x of collectSubtreeIds(nodes, id)) {
+      for (const x of subtree) {
         nodes.delete(x)
         delete layerNames[x]
         selected.delete(x)
       }
     }
+  }
+
+  function groupSelection(): void {
+    const ids = [...selected]
+    if (ids.length < 2) return
+    const parentId = nodes.get(ids[0]!)?.parentId ?? null
+    if (!ids.every((id) => (nodes.get(id)?.parentId ?? null) === parentId)) {
+      alert('Select layers that share the same parent to group.')
+      return
+    }
+    const u = unionBoundsWorld(ids, nodes, definitions)
+    if (!u) return
+    const pwo = parentId ? parentWorldOrigin(ids[0]!) : { x: 0, y: 0 }
+    const gx = u.left - pwo.x
+    const gy = u.top - pwo.y
+    const gw = u.right - u.left
+    const gh = u.bottom - u.top
+    const list = [...siblingListForParent(parentId)]
+    const insertAt = Math.min(...ids.map((id) => list.indexOf(id)).filter((i) => i >= 0))
+    for (const id of ids) removeChildRef(parentId, id)
+    const gid = newId()
+    const g: SceneGroup = {
+      id: gid,
+      parentId,
+      type: 'group',
+      x: gx,
+      y: gy,
+      width: gw,
+      height: gh,
+      childIds: [],
+    }
+    nodes.set(gid, g)
+    for (const id of ids) {
+      const c = nodes.get(id)
+      if (!c) continue
+      c.parentId = gid
+      c.x -= gx
+      c.y -= gy
+      g.childIds.push(id)
+    }
+    insertChildRef(parentId, gid, insertAt)
+    selected = new Set([gid])
+    commit()
+  }
+
+  function ungroupSelection(): void {
+    const id = [...selected][0]
+    if (!id) return
+    const g = nodes.get(id)
+    if (g?.type !== 'group') return
+    const parentId = g.parentId
+    const list = [...siblingListForParent(parentId)]
+    const insertIdx = list.indexOf(id)
+    removeChildRef(parentId, id)
+    const gx = g.x
+    const gy = g.y
+    const kids = [...g.childIds]
+    for (const cid of kids) {
+      const c = nodes.get(cid)
+      if (!c) continue
+      c.parentId = parentId
+      c.x += gx
+      c.y += gy
+    }
+    if (parentId === null) {
+      rootIds.splice(insertIdx, 1)
+      rootIds.splice(insertIdx, 0, ...kids)
+    } else {
+      const p = nodes.get(parentId)
+      if (p?.type === 'group') {
+        const arr = [...p.childIds]
+        const i = arr.indexOf(id)
+        if (i >= 0) {
+          arr.splice(i, 1, ...kids)
+          p.childIds = arr
+        }
+      }
+    }
+    nodes.delete(id)
+    delete layerNames[id]
+    selected = new Set(kids)
+    commit()
+  }
+
+  function cloneSubtreeAsComponentDefinition(rootId: string): ComponentDefinition | null {
+    const ids = [...collectSubtreeIds(nodes, rootId)]
+    const idMap = new Map<string, string>()
+    for (const oldId of ids) {
+      idMap.set(oldId, newId())
+    }
+    const newNodes: Record<string, DefNode> = {}
+    for (const oldId of ids) {
+      const raw = nodes.get(oldId)
+      if (!raw || raw.type === 'instance') continue
+      const nid = idMap.get(oldId)!
+      const copy = JSON.parse(JSON.stringify(raw)) as DefNode
+      copy.id = nid
+      copy.parentId = oldId === rootId ? null : idMap.get(raw.parentId!)!
+      if (copy.type === 'group' && raw.type === 'group') {
+        copy.childIds = raw.childIds.map((c: string) => idMap.get(c)!)
+      }
+      newNodes[nid] = copy
+    }
+    const newRoot = idMap.get(rootId)!
+    const def: ComponentDefinition = {
+      id: newId(),
+      name: `Component ${definitions.size + 1}`,
+      rootId: newRoot,
+      intrinsicW: 100,
+      intrinsicH: 100,
+      nodes: newNodes,
+    }
+    normalizeDefinitionOrigin(def)
+    return def
+  }
+
+  function createComponentFromSelection(): void {
+    const tops = [...selected].filter(
+      (id) => ![...selected].some((o) => o !== id && isDescendant(nodes, o, id)),
+    )
+    if (tops.length === 0) return
+    let rootId: string
+    if (tops.length === 1) {
+      rootId = tops[0]!
+    } else {
+      const parentId = nodes.get(tops[0]!)?.parentId ?? null
+      if (!tops.every((id) => (nodes.get(id)?.parentId ?? null) === parentId)) {
+        alert('Select siblings with the same parent, or Group them first.')
+        return
+      }
+      const u = unionBoundsWorld(tops, nodes, definitions)
+      if (!u) return
+      const pwo = parentId ? parentWorldOrigin(tops[0]!) : { x: 0, y: 0 }
+      const gx = u.left - pwo.x
+      const gy = u.top - pwo.y
+      const gw = u.right - u.left
+      const gh = u.bottom - u.top
+      const list = [...siblingListForParent(parentId)]
+      const insertAt = Math.min(...tops.map((id) => list.indexOf(id)).filter((i) => i >= 0))
+      for (const id of tops) removeChildRef(parentId, id)
+      const gid = newId()
+      const g: SceneGroup = {
+        id: gid,
+        parentId,
+        type: 'group',
+        x: gx,
+        y: gy,
+        width: gw,
+        height: gh,
+        childIds: [],
+      }
+      nodes.set(gid, g)
+      for (const id of tops) {
+        const c = nodes.get(id)
+        if (!c) continue
+        c.parentId = gid
+        c.x -= gx
+        c.y -= gy
+        g.childIds.push(id)
+      }
+      insertChildRef(parentId, gid, insertAt)
+      rootId = gid
+      selected = new Set([gid])
+    }
+    const n = getNode(rootId)
+    if (!n || n.type === 'instance') return
+    const wf = worldFrame(nodes, definitions, rootId)
+    if (!wf) return
+    const def = cloneSubtreeAsComponentDefinition(rootId)
+    if (!def) return
+    const parentId = n.parentId
+    const list = [...siblingListForParent(parentId)]
+    const insertIdx = list.indexOf(rootId)
+    const pwo = parentId ? parentWorldOrigin(rootId) : { x: 0, y: 0 }
+    const ix = wf.x - pwo.x
+    const iy = wf.y - pwo.y
+    removeChildRef(parentId, rootId)
+    for (const x of collectSubtreeIds(nodes, rootId)) {
+      nodes.delete(x)
+      delete layerNames[x]
+    }
+    definitions.set(def.id, def)
+    const instId = newId()
+    nodes.set(instId, {
+      id: instId,
+      parentId,
+      type: 'instance',
+      componentId: def.id,
+      x: ix,
+      y: iy,
+      width: wf.width,
+      height: wf.height,
+    })
+    insertChildRef(parentId, instId, insertIdx >= 0 ? insertIdx : rootIds.length)
+    selected = new Set([instId])
+    commit()
+  }
+
+  function scaleSceneSubtree(nodeId: string, sx: number, sy: number): void {
+    const n = nodes.get(nodeId)
+    if (!n) return
+    n.x *= sx
+    n.y *= sy
+    n.width *= sx
+    n.height *= sy
+    if (n.type === 'text') {
+      n.fontSize = clamp(Math.round(n.fontSize * Math.min(sx, sy)), 4, 400)
+      n.height = n.fontSize
+    }
+    if (n.type === 'group') {
+      for (const cid of n.childIds) {
+        scaleSceneSubtree(cid, sx, sy)
+      }
+    }
+  }
+
+  function detachInstance(): void {
+    const id = [...selected][0]
+    if (!id) return
+    const inst = getNode(id)
+    if (inst?.type !== 'instance') return
+    const def = definitions.get(inst.componentId)
+    if (!def) return
+    const parentId = inst.parentId
+    const list = [...siblingListForParent(parentId)]
+    const insertIdx = list.indexOf(id)
+    const sx = inst.width / Math.max(1e-6, def.intrinsicW)
+    const sy = inst.height / Math.max(1e-6, def.intrinsicH)
+    const idMap = new Map<string, string>()
+    for (const k of Object.keys(def.nodes)) {
+      idMap.set(k, newId())
+    }
+    const cloneDefNode = (oldId: string, newParent: string | null): void => {
+      const dn = def.nodes[oldId]
+      if (!dn) return
+      const nid = idMap.get(oldId)!
+      const copy = JSON.parse(JSON.stringify(dn)) as SceneNode
+      copy.id = nid
+      copy.parentId = newParent
+      if (copy.type === 'group' && dn.type === 'group') {
+        copy.childIds = dn.childIds.map((c: string) => idMap.get(c)!)
+      }
+      nodes.set(nid, copy)
+      if (dn.type === 'group') {
+        for (const c of dn.childIds) {
+          cloneDefNode(c, nid)
+        }
+      }
+    }
+    cloneDefNode(def.rootId, parentId)
+    const newRoot = idMap.get(def.rootId)!
+    removeChildRef(parentId, id)
+    nodes.delete(id)
+    const nr = getNode(newRoot)!
+    nr.x = inst.x
+    nr.y = inst.y
+    if (nr.type === 'group') {
+      nr.width *= sx
+      nr.height *= sy
+      for (const cid of nr.childIds) {
+        scaleSceneSubtree(cid, sx, sy)
+      }
+    } else {
+      scaleSceneSubtree(newRoot, sx, sy)
+    }
+    insertChildRef(parentId, newRoot, insertIdx >= 0 ? insertIdx : rootIds.length)
+    selected = new Set([newRoot])
+    commit()
+  }
+
+  function insertComponentInstance(compId: string): void {
+    const def = definitions.get(compId)
+    if (!def) return
+    const w = Math.min(def.intrinsicW, VIEW_W * 0.5)
+    const h = Math.min(def.intrinsicH, VIEW_H * 0.5)
+    const nid = newId()
+    nodes.set(nid, {
+      id: nid,
+      parentId: null,
+      type: 'instance',
+      componentId: compId,
+      x: (VIEW_W - w) / 2,
+      y: (VIEW_H - h) / 2,
+      width: w,
+      height: h,
+    })
+    rootIds.push(nid)
+    selected = new Set([nid])
+    commit()
   }
 
   function defSubtreeBounds(
@@ -1534,8 +1533,7 @@ export function mount(root: HTMLElement): void {
       root.x += dx
       root.y += dy
     }
-    def.intrinsicW = Math.max(MIN_ITEM_SIZE, b.maxX - b.minX)
-    def.intrinsicH = Math.max(MIN_ITEM_SIZE, b.maxY - b.minY)
+    recomputeIntrinsic(def)
   }
 
   function recomputeIntrinsic(def: ComponentDefinition): void {
@@ -1547,6 +1545,44 @@ export function mount(root: HTMLElement): void {
     }
     def.intrinsicW = Math.max(MIN_ITEM_SIZE, b.maxX - b.minX)
     def.intrinsicH = Math.max(MIN_ITEM_SIZE, b.maxY - b.minY)
+  }
+
+  function worldNodeOrigin(id: string): { x: number; y: number } {
+    let ox = 0
+    let oy = 0
+    let cur: string | null = id
+    const chain: SceneNode[] = []
+    while (cur) {
+      const node = nodes.get(cur)
+      if (!node) break
+      chain.unshift(node)
+      cur = node.parentId
+    }
+    for (const node of chain) {
+      ox += node.x
+      oy += node.y
+    }
+    return { x: ox, y: oy }
+  }
+
+  function serializeSubtreeForExport(id: string, ind: string): string {
+    const n = nodes.get(id)
+    if (!n) return ''
+    if (n.type === 'group') {
+      const inner = n.childIds
+        .map((cid) => serializeSceneSubtreeSvg(nodes, definitions, cid, `${ind}  `))
+        .join('\n')
+      return `${ind}<g>\n${inner}\n${ind}</g>`
+    }
+    if (n.type === 'instance') {
+      const def = definitions.get(n.componentId)
+      if (!def) return ''
+      const sx = n.width / Math.max(1e-6, def.intrinsicW)
+      const sy = n.height / Math.max(1e-6, def.intrinsicH)
+      const inner = serializeDefSubtreeSvg(def, def.rootId, `${ind}  `)
+      return `${ind}<g transform="scale(${sx} ${sy})">\n${inner}\n${ind}</g>`
+    }
+    return `${ind}${buildSvgFragmentLeafLocal(n)}`
   }
 
   function hitTestWorld(wx: number, wy: number): string | null {
@@ -1603,6 +1639,8 @@ export function mount(root: HTMLElement): void {
   function enterComponentEdit(compId: string): void {
     const d = definitions.get(compId)
     if (!d) return
+    closeTbDropdown()
+    closeColorPickerPanel()
     mainNodesBackup = new Map(nodes)
     mainRootIdsBackup = [...rootIds]
     nodes = recordToNodes({ ...d.nodes } as Record<string, SceneNode>)
@@ -1663,8 +1701,12 @@ export function mount(root: HTMLElement): void {
     itemsG.querySelectorAll<SVGGElement>('.pop-item').forEach((g) => {
       const id = g.dataset.id
       if (!id) return
-      g.classList.toggle('pop-item-selected', selected.has(id))
+      const canvasHighlight =
+        selected.size > 0 &&
+        [...selected].some((s) => isDescendant(nodes, s, id))
+      g.classList.toggle('pop-item-selected', canvasHighlight)
     })
+    if (layersAsideTab === 'parent') renderParentPanel()
   }
 
   function pruneLayerNames(): void {
@@ -1684,13 +1726,48 @@ export function mount(root: HTMLElement): void {
     return p?.type === 'group' ? p.childIds : []
   }
 
-  function indexInParent(childId: string): { parentId: string | null; index: number } | null {
-    const n = nodes.get(childId)
-    if (!n) return null
-    const list = siblingListForParent(n.parentId)
-    const idx = list.indexOf(childId)
+  /** Wrap a single leaf in a new group at the same place in the tree (for nest-into). */
+  function wrapLeafAsNewGroup(leafId: string): string | null {
+    const t = nodes.get(leafId)
+    if (!t || t.type === 'instance' || t.type === 'group') return null
+    const parentId = t.parentId
+    const list = [...siblingListForParent(parentId)]
+    const idx = list.indexOf(leafId)
     if (idx < 0) return null
-    return { parentId: n.parentId, index: idx }
+    removeChildRef(parentId, leafId)
+    const gid = newId()
+    const g: SceneGroup = {
+      id: gid,
+      parentId,
+      type: 'group',
+      x: t.x,
+      y: t.y,
+      width: t.width,
+      height: t.height,
+      childIds: [leafId],
+    }
+    nodes.set(gid, g)
+    t.parentId = gid
+    t.x = 0
+    t.y = 0
+    insertChildRef(parentId, gid, idx)
+    return gid
+  }
+
+  /**
+   * Target for "drop into": existing group, or parent group if target is the only child (avoid nested wrappers),
+   * or a new wrapper group around a leaf.
+   */
+  function resolveNestContainerId(targetId: string): string | null {
+    const t = nodes.get(targetId)
+    if (!t || t.type === 'instance') return null
+    if (t.type === 'group') return targetId
+    const p = t.parentId
+    const pn = p ? nodes.get(p) : undefined
+    if (pn?.type === 'group' && pn.childIds.length === 1 && pn.childIds[0] === targetId) {
+      return p!
+    }
+    return wrapLeafAsNewGroup(targetId)
   }
 
   function moveLayerNode(
@@ -1699,35 +1776,49 @@ export function mount(root: HTMLElement): void {
     kind: 'before' | 'into',
   ): void {
     if (dragId === targetId) return
-    if (kind === 'into' && isDescendant(nodes, dragId, targetId)) return
-    const info = indexInParent(dragId)
-    if (!info) return
-    removeChildRef(info.parentId, dragId)
+    const d = nodes.get(dragId)
+    if (!d) return
+
     if (kind === 'into') {
-      const t = nodes.get(targetId)
-      if (t?.type !== 'group') return
-      const n = nodes.get(dragId)
-      if (!n) return
-      n.parentId = targetId
-      t.childIds.push(dragId)
+      if (isDescendant(nodes, dragId, targetId)) return
+      const containerId = resolveNestContainerId(targetId)
+      if (!containerId) return
+      if (isDescendant(nodes, dragId, containerId)) return
+      const g = nodes.get(containerId)
+      if (g?.type !== 'group') return
+      const wf = worldFrame(nodes, definitions, dragId)
+      if (!wf) return
+      const insertAt = g.childIds.length
+      insertChildRef(containerId, dragId, insertAt)
+      const pwf = worldFrame(nodes, definitions, containerId)
+      if (!pwf) return
+      d.x = wf.x - pwf.x
+      d.y = wf.y - pwf.y
       return
     }
-    const tInfo = indexInParent(targetId)
-    if (!tInfo) return
-    const n = nodes.get(dragId)
-    if (!n) return
-    let insertIdx = tInfo.index
-    if (tInfo.parentId === info.parentId && info.index < tInfo.index) insertIdx -= 1
-    n.parentId = tInfo.parentId
-    if (tInfo.parentId === null) {
-      rootIds.splice(insertIdx, 0, dragId)
+
+    if (isDescendant(nodes, dragId, targetId)) return
+    const t = nodes.get(targetId)
+    if (!t) return
+    const parentId = t.parentId
+    const listBefore = [...siblingListForParent(parentId)]
+    const ti = listBefore.indexOf(targetId)
+    if (ti < 0) return
+    const wf = worldFrame(nodes, definitions, dragId)
+    if (!wf) return
+    removeChildRef(d.parentId, dragId)
+    const listAfter = siblingListForParent(parentId)
+    const insertAt = listAfter.indexOf(targetId)
+    if (insertAt < 0) return
+    insertChildRef(parentId, dragId, insertAt)
+    if (parentId === null) {
+      d.x = wf.x
+      d.y = wf.y
     } else {
-      const p = nodes.get(tInfo.parentId)
-      if (p?.type === 'group') {
-        const next = [...p.childIds]
-        next.splice(insertIdx, 0, dragId)
-        p.childIds = next
-      }
+      const pwf = worldFrame(nodes, definitions, parentId)
+      if (!pwf) return
+      d.x = wf.x - pwf.x
+      d.y = wf.y - pwf.y
     }
   }
 
@@ -1748,16 +1839,22 @@ export function mount(root: HTMLElement): void {
 
       const dragEl = document.createElement('span')
       dragEl.className = 'pop-layer-drag'
-      dragEl.draggable = true
+      dragEl.draggable = false
       dragEl.setAttribute('aria-hidden', 'true')
       dragEl.textContent = '⠿'
-      dragEl.addEventListener('dragstart', (e) => {
+
+      row.draggable = true
+      row.addEventListener('dragstart', (e) => {
+        if ((e.target as HTMLElement).closest('.pop-layer-name')) {
+          e.preventDefault()
+          return
+        }
         layerDragId = id
         e.dataTransfer?.setData('text/plain', id)
         e.dataTransfer!.effectAllowed = 'move'
         li.classList.add('pop-layer-dragging')
       })
-      dragEl.addEventListener('dragend', () => {
+      row.addEventListener('dragend', () => {
         layerDragId = null
         layerDropTargetId = null
         layerDropKind = null
@@ -1809,11 +1906,16 @@ export function mount(root: HTMLElement): void {
         e.preventDefault()
         e.dataTransfer!.dropEffect = 'move'
         const rect = li.getBoundingClientRect()
-        const into = item.type === 'group' && e.clientY > rect.top + rect.height * 0.35
+        const intoZone =
+          item.type === 'instance'
+            ? false
+            : item.type === 'group'
+              ? e.clientY > rect.top + rect.height * 0.33
+              : e.clientY > rect.top + rect.height * 0.5
         layerList.querySelectorAll('.pop-layer-drop-before, .pop-layer-drop-into').forEach((el) => {
           el.classList.remove('pop-layer-drop-before', 'pop-layer-drop-into')
         })
-        if (into) {
+        if (intoZone) {
           li.classList.add('pop-layer-drop-into')
           layerDropKind = 'into'
         } else {
@@ -1847,8 +1949,7 @@ export function mount(root: HTMLElement): void {
 
       li.addEventListener('click', (e) => {
         if ((e.target as Element).closest('.pop-layer-name')) return
-        if ((e.target as Element).closest('.pop-layer-drag')) return
-        if (e.shiftKey) {
+        if (additiveMultiSelect(e)) {
           if (selected.has(id)) selected.delete(id)
           else selected.add(id)
         } else {
@@ -1888,18 +1989,13 @@ export function mount(root: HTMLElement): void {
     layerList.replaceChildren()
     renderLayerBranch(layerList, null, 0)
 
-    layerList.addEventListener(
-      'dragover',
-      (e) => {
-        if (!layerDragId) return
-        e.preventDefault()
-      },
-      { passive: false },
-    )
-
     if (preserveId) {
+      const esc =
+        typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+          ? CSS.escape(preserveId)
+          : preserveId.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
       const inp = layerList.querySelector<HTMLInputElement>(
-        `li.pop-layer[data-id="${CSS.escape(preserveId)}"] .pop-layer-name`,
+        `li.pop-layer[data-id="${esc}"] .pop-layer-name`,
       )
       if (inp) {
         inp.focus()
@@ -1917,70 +2013,118 @@ export function mount(root: HTMLElement): void {
     updateCompPickList()
   }
 
-  function renderItems(): void {
-    itemsG.replaceChildren()
-    for (const item of items) {
+  function renderDefSubtree(
+    def: ComponentDefinition,
+    id: string,
+    parentG: SVGGElement,
+  ): void {
+    const n = def.nodes[id]
+    if (!n) return
+    if (n.type === 'group') {
+      const gg = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+      gg.setAttribute('transform', `translate(${n.x} ${n.y})`)
+      for (const cid of n.childIds) {
+        renderDefSubtree(def, cid, gg)
+      }
+      parentG.appendChild(gg)
+      return
+    }
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    g.setAttribute('transform', `translate(${n.x} ${n.y})`)
+    const frag = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    frag.innerHTML = buildSvgFragmentLeafLocal(n)
+    while (frag.firstChild) g.appendChild(frag.firstChild)
+    parentG.appendChild(g)
+  }
+
+  function renderSceneNode(id: string, parentG: SVGGElement): void {
+    const item = nodes.get(id)
+    if (!item) return
+    if (item.type === 'group') {
       const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
       g.classList.add('pop-item')
       g.dataset.id = item.id
-      if (item.type === 'rect') {
-        const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
-        r.setAttribute('x', String(item.x))
-        r.setAttribute('y', String(item.y))
-        r.setAttribute('width', String(item.width))
-        r.setAttribute('height', String(item.height))
-        r.setAttribute('fill', item.fill)
-        r.setAttribute('stroke', item.stroke)
-        r.setAttribute('stroke-width', String(item.strokeWidth))
-        g.appendChild(r)
-      } else if (item.type === 'ellipse') {
-        const el = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse')
-        el.setAttribute('cx', String(item.x + item.width / 2))
-        el.setAttribute('cy', String(item.y + item.height / 2))
-        el.setAttribute('rx', String(item.width / 2))
-        el.setAttribute('ry', String(item.height / 2))
-        el.setAttribute('fill', item.fill)
-        el.setAttribute('stroke', item.stroke)
-        el.setAttribute('stroke-width', String(item.strokeWidth))
-        g.appendChild(el)
-      } else if (item.type === 'text') {
-        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text')
-        t.setAttribute('x', String(item.x))
-        t.setAttribute('y', String(item.y + item.fontSize))
-        t.setAttribute('font-size', String(item.fontSize))
-        t.setAttribute('font-family', 'system-ui, sans-serif')
-        t.setAttribute('fill', item.fill)
-        t.textContent = item.content
-        g.appendChild(t)
-      } else {
-        const im = document.createElementNS('http://www.w3.org/2000/svg', 'image')
-        im.setAttribute('href', item.href)
-        im.setAttribute('x', String(item.x))
-        im.setAttribute('y', String(item.y))
-        im.setAttribute('width', String(item.width))
-        im.setAttribute('height', String(item.height))
-        im.setAttribute('preserveAspectRatio', 'none')
-        g.appendChild(im)
+      g.setAttribute('transform', `translate(${item.x} ${item.y})`)
+      for (const cid of item.childIds) {
+        renderSceneNode(cid, g)
       }
-      itemsG.appendChild(g)
+      parentG.appendChild(g)
+      return
+    }
+    if (item.type === 'instance') {
+      const def = definitions.get(item.componentId)
+      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+      g.classList.add('pop-item')
+      g.dataset.id = item.id
+      const sx = item.width / Math.max(1e-6, def?.intrinsicW ?? 1)
+      const sy = item.height / Math.max(1e-6, def?.intrinsicH ?? 1)
+      g.setAttribute('transform', `translate(${item.x} ${item.y}) scale(${sx} ${sy})`)
+      if (def) {
+        renderDefSubtree(def, def.rootId, g)
+      }
+      parentG.appendChild(g)
+      return
+    }
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    g.classList.add('pop-item')
+    g.dataset.id = item.id
+    g.setAttribute('transform', `translate(${item.x} ${item.y})`)
+    const frag = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    frag.innerHTML = buildSvgFragmentLeafLocal(item)
+    while (frag.firstChild) g.appendChild(frag.firstChild)
+    parentG.appendChild(g)
+  }
+
+  function renderItems(): void {
+    itemsG.replaceChildren()
+    for (const rid of rootIds) {
+      renderSceneNode(rid, itemsG)
     }
     updateSelectionUi()
   }
 
   const HANDLE_HALF = 5
 
+  function parentWorldOrigin(nodeId: string): { x: number; y: number } {
+    const n = nodes.get(nodeId)
+    if (!n) return { x: 0, y: 0 }
+    let ox = 0
+    let oy = 0
+    let cur: string | null = n.parentId
+    const chain: SceneNode[] = []
+    while (cur) {
+      const node = nodes.get(cur)
+      if (!node) break
+      chain.unshift(node)
+      cur = node.parentId
+    }
+    for (const node of chain) {
+      ox += node.x
+      oy += node.y
+    }
+    return { x: ox, y: oy }
+  }
+
+  function pointerToLocalParent(px: number, py: number, nodeId: string): { x: number; y: number } {
+    const o = parentWorldOrigin(nodeId)
+    return { x: px - o.x, y: py - o.y }
+  }
+
   function renderHandles(): void {
     handlesG.replaceChildren()
     if (tool !== 'select' || selected.size !== 1) return
     const id = [...selected][0]!
-    const it = getItemById(id)
+    const it = getNode(id)
     if (!it) return
 
+    const wf = worldFrame(nodes, definitions, id)
+    if (!wf) return
+
     const outline = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
-    outline.setAttribute('x', String(it.x))
-    outline.setAttribute('y', String(it.y))
-    outline.setAttribute('width', String(it.width))
-    outline.setAttribute('height', String(it.height))
+    outline.setAttribute('x', String(wf.x))
+    outline.setAttribute('y', String(wf.y))
+    outline.setAttribute('width', String(wf.width))
+    outline.setAttribute('height', String(wf.height))
     outline.setAttribute('fill', 'none')
     outline.setAttribute('stroke', '#a5b4fc')
     outline.setAttribute('stroke-width', '1')
@@ -2005,7 +2149,7 @@ export function mount(root: HTMLElement): void {
       handlesG.appendChild(hr)
     }
 
-    const { x, y, width: w, height: h } = it
+    const { x, y, width: w, height: h } = wf
     addHandle('nw', x, y)
     addHandle('n', x + w / 2, y)
     addHandle('ne', x + w, y)
@@ -2032,17 +2176,34 @@ export function mount(root: HTMLElement): void {
 
   function hitItemId(ev: PointerEvent): string | null {
     const { x, y } = clientToSvg(ev)
-    for (let i = items.length - 1; i >= 0; i--) {
-      const it = items[i]!
-      if (x >= it.x && x <= it.x + it.width && y >= it.y && y <= it.y + it.height) {
-        return it.id
-      }
-    }
-    return null
+    return hitTestWorld(x, y)
   }
 
   toolButtons.forEach((b) => {
     b.addEventListener('click', () => setTool(b.dataset.tool as Tool))
+  })
+
+  layerList.addEventListener('dragover', (e) => {
+    if (!layerDragId) return
+    e.preventDefault()
+  })
+
+  btnGroup.addEventListener('click', () => groupSelection())
+  btnUngroup.addEventListener('click', () => ungroupSelection())
+  btnCreateComp.addEventListener('click', () => createComponentFromSelection())
+  btnDetach.addEventListener('click', () => detachInstance())
+  btnEditComp.addEventListener('click', () => {
+    const id = [...selected][0]
+    const n = id ? getNode(id) : undefined
+    if (n?.type === 'instance') enterComponentEdit(n.componentId)
+  })
+  btnCompDone.addEventListener('click', () => exitComponentEdit(true))
+  selCompPick.addEventListener('change', () => {
+    btnInsertInst.disabled = definitions.size === 0 || selCompPick.value === ''
+  })
+  btnInsertInst.addEventListener('click', () => {
+    const v = selCompPick.value
+    if (v) insertComponentInstance(v)
   })
 
   syncViewportTransform()
@@ -2080,7 +2241,7 @@ export function mount(root: HTMLElement): void {
     syncChromeFromInputs()
     updateFillSwatch()
     for (const id of selected) {
-      const it = getItemById(id)
+      const it = getNode(id)
       if (!it) continue
       if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text') {
         it.fill = defaultFill
@@ -2093,7 +2254,7 @@ export function mount(root: HTMLElement): void {
     syncChromeFromInputs()
     updateStrokeSwatch()
     for (const id of selected) {
-      const it = getItemById(id)
+      const it = getNode(id)
       if (it && (it.type === 'rect' || it.type === 'ellipse')) {
         it.stroke = defaultStroke
       }
@@ -2104,7 +2265,7 @@ export function mount(root: HTMLElement): void {
   strokeWInput.addEventListener('input', () => {
     syncChromeFromInputs()
     for (const id of selected) {
-      const it = getItemById(id)
+      const it = getNode(id)
       if (it && (it.type === 'rect' || it.type === 'ellipse')) {
         it.strokeWidth = defaultStrokeWidth
       }
@@ -2113,22 +2274,50 @@ export function mount(root: HTMLElement): void {
   })
 
   btnDelete.addEventListener('click', () => {
-    items = items.filter((i) => !selected.has(i.id))
+    deleteNodesSubtrees(selectedDeletionRoots())
     selected.clear()
     commit()
   })
 
   btnExportSel.addEventListener('click', () => {
-    const list = items.filter((i) => selected.has(i.id))
-    if (list.length === 0) {
-      alert('Select one or more layers first (click on the canvas or list, Shift for multi-select).')
+    if (selected.size === 0) {
+      alert(
+        'Select one or more layers first (canvas or list; ⌘/Ctrl+click or Shift+click for multi-select).',
+      )
       return
     }
-    downloadSvg(serializeSvg(list, VIEW_W, VIEW_H), 'pop-selection.svg')
+    const tops = [...selected].filter(
+      (id) => ![...selected].some((o) => o !== id && isDescendant(nodes, o, id)),
+    )
+    const parts = tops
+      .map((id) => {
+        const o = worldNodeOrigin(id)
+        const inner = serializeSubtreeForExport(id, '    ')
+        return `  <g transform="translate(${o.x} ${o.y})">\n${inner}\n  </g>`
+      })
+      .join('\n')
+    const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${VIEW_W}" height="${VIEW_H}" viewBox="0 0 ${VIEW_W} ${VIEW_H}">
+${parts}
+</svg>
+`
+    downloadSvg(svg, 'pop-selection.svg')
   })
 
   btnExportAll.addEventListener('click', () => {
-    downloadSvg(serializeSvg(items, VIEW_W, VIEW_H), 'pop-canvas.svg')
+    downloadSvg(serializeSvgFromRoots(rootIds, nodes, definitions, VIEW_W, VIEW_H), 'pop-canvas.svg')
+  })
+
+  tabLayersBtn.addEventListener('click', () => setLayersAsideTab('layers'))
+  tabParentBtn.addEventListener('click', () => setLayersAsideTab('parent'))
+  btnSelectSiblings.addEventListener('click', () => {
+    const prim = primarySelectionId()
+    if (!prim) return
+    const p = nodes.get(prim)?.parentId ?? null
+    selected = new Set(siblingListForParent(p))
+    updateSelectionUi()
+    syncPropsFromSelection()
+    renderHandles()
   })
 
   fileInput.addEventListener('change', () => {
@@ -2149,8 +2338,9 @@ export function mount(root: HTMLElement): void {
         const x = (VIEW_W - w) / 2
         const y = (VIEW_H - h) / 2
         const nid = newId()
-        items.push({
+        nodes.set(nid, {
           id: nid,
+          parentId: null,
           type: 'image',
           x,
           y,
@@ -2158,6 +2348,7 @@ export function mount(root: HTMLElement): void {
           height: h,
           href,
         })
+        rootIds.push(nid)
         selected = new Set([nid])
         setTool('select')
         commit()
@@ -2176,8 +2367,8 @@ export function mount(root: HTMLElement): void {
       const iid = handleEl.getAttribute('data-item-id')
       const only = [...selected][0]
       if (hid && iid && only === iid) {
-        const it = getItemById(iid)
-        if (it) {
+        const it = getNode(iid)
+        if (it && it.type !== 'group') {
           ev.preventDefault()
           resizeState.active = true
           resizeState.pointerId = ev.pointerId
@@ -2201,7 +2392,7 @@ export function mount(root: HTMLElement): void {
 
     if (tool === 'select') {
       if (id) {
-        if (ev.shiftKey) {
+        if (additiveMultiSelect(ev)) {
           if (selected.has(id)) selected.delete(id)
           else selected.add(id)
         } else if (!selected.has(id)) {
@@ -2217,12 +2408,12 @@ export function mount(root: HTMLElement): void {
         dragState.startSvgY = p0.y
         dragState.origins.clear()
         for (const sid of selected) {
-          const it = getItemById(sid)
+          const it = getNode(sid)
           if (it) dragState.origins.set(sid, { x: it.x, y: it.y })
         }
         svg.setPointerCapture(ev.pointerId)
       } else {
-        if (!ev.shiftKey) selected.clear()
+        if (!additiveMultiSelect(ev)) selected.clear()
         updateSelectionUi()
         syncPropsFromSelection()
         renderHandles()
@@ -2238,8 +2429,9 @@ export function mount(root: HTMLElement): void {
       const w = 140
       const h = 90
       const nid = newId()
-      items.push({
+      nodes.set(nid, {
         id: nid,
+        parentId: null,
         type: 'rect',
         x: x - w / 2,
         y: y - h / 2,
@@ -2249,14 +2441,16 @@ export function mount(root: HTMLElement): void {
         stroke: defaultStroke,
         strokeWidth: defaultStrokeWidth,
       })
+      rootIds.push(nid)
       selected = new Set([nid])
       setTool('select')
     } else if (tool === 'ellipse') {
       const w = 120
       const h = 120
       const nid = newId()
-      items.push({
+      nodes.set(nid, {
         id: nid,
+        parentId: null,
         type: 'ellipse',
         x: x - w / 2,
         y: y - h / 2,
@@ -2266,6 +2460,7 @@ export function mount(root: HTMLElement): void {
         stroke: defaultStroke,
         strokeWidth: defaultStrokeWidth,
       })
+      rootIds.push(nid)
       selected = new Set([nid])
       setTool('select')
     } else if (tool === 'text') {
@@ -2273,8 +2468,9 @@ export function mount(root: HTMLElement): void {
       if (content === null) return
       const fontSize = 28
       const nid = newId()
-      items.push({
+      nodes.set(nid, {
         id: nid,
+        parentId: null,
         type: 'text',
         x,
         y: y - fontSize,
@@ -2284,6 +2480,7 @@ export function mount(root: HTMLElement): void {
         fontSize,
         fill: defaultFill,
       })
+      rootIds.push(nid)
       selected = new Set([nid])
       setTool('select')
     }
@@ -2293,11 +2490,12 @@ export function mount(root: HTMLElement): void {
 
   window.addEventListener('pointermove', (ev) => {
     if (resizeState.active && ev.pointerId === resizeState.pointerId) {
-      const it = resizeState.itemId ? getItemById(resizeState.itemId) : undefined
+      const it = resizeState.itemId ? getNode(resizeState.itemId) : undefined
       const hid = resizeState.handle
-      if (!it || !hid) return
+      if (!it || !hid || it.type === 'group') return
       const p = clientToSvg(ev)
-      const out = applyResizeHandle(hid, p.x, p.y, resizeState.start)
+      const pl = pointerToLocalParent(p.x, p.y, resizeState.itemId!)
+      const out = applyResizeHandle(hid, pl.x, pl.y, resizeState.start)
       it.x = out.x
       it.y = out.y
       it.width = out.width
@@ -2320,7 +2518,7 @@ export function mount(root: HTMLElement): void {
     const dy = p.y - dragState.startSvgY
     for (const sid of selected) {
       const origin = dragState.origins.get(sid)
-      const it = getItemById(sid)
+      const it = getNode(sid)
       if (!origin || !it) continue
       it.x = origin.x + dx
       it.y = origin.y + dy
@@ -2331,15 +2529,15 @@ export function mount(root: HTMLElement): void {
     lastSnapHint = null
 
     if (symmetryGuidesOn && selected.size > 0) {
-      const u = unionBounds(selected, getItemById)
+      const u = unionBoundsWorld(selected, nodes, definitions)
       if (u) {
-        const tx = collectSnapTargetsX(selected, items)
-        const ty = collectSnapTargetsY(selected, items)
+        const tx = collectSnapTargetsX(selected, nodes, definitions)
+        const ty = collectSnapTargetsY(selected, nodes, definitions)
         const sx = snapAxis('x', u.left, u.cx, u.right, tx, SNAP_PX)
         const sy = snapAxis('y', u.top, u.cy, u.bottom, ty, SNAP_PX)
         if (sx.delta !== 0 || sy.delta !== 0) {
           for (const sid of selected) {
-            const it = getItemById(sid)
+            const it = getNode(sid)
             if (it) {
               it.x += sx.delta
               it.y += sy.delta
@@ -2424,12 +2622,16 @@ export function mount(root: HTMLElement): void {
   })
 
   window.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && editingComponentId) {
+      exitComponentEdit(false)
+      return
+    }
     if (ev.key === 'Delete' || ev.key === 'Backspace') {
       const t = ev.target as HTMLElement
       if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
       if (selected.size === 0) return
       ev.preventDefault()
-      items = items.filter((i) => !selected.has(i.id))
+      deleteNodesSubtrees(selectedDeletionRoots())
       selected.clear()
       commit()
     }

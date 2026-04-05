@@ -1,4 +1,8 @@
 import './style.css'
-import { mount } from './svg-studio.ts'
+import { mount } from 'svelte'
+import App from './App.svelte'
 
-mount(document.querySelector<HTMLDivElement>('#app')!)
+const target = document.querySelector<HTMLDivElement>('#app')
+if (!target) throw new Error('Missing #app')
+
+mount(App, { target })
