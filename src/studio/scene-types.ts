@@ -2,6 +2,26 @@ export type Tool = 'select' | 'rect' | 'ellipse' | 'text' | 'image'
 
 export type SceneNodeBase = { id: string; parentId: string | null }
 
+export type GroupLayout =
+  | { type: 'none' }
+  | {
+      type: 'stack'
+      direction: 'horizontal' | 'vertical'
+      gap: number
+      padding: number
+    }
+
+export type HtmlExportRole =
+  | 'auto'
+  | 'div'
+  | 'button'
+  | 'section'
+  | 'main'
+  | 'header'
+  | 'footer'
+  | 'nav'
+  | 'card'
+
 export type SceneLeaf =
   | (SceneNodeBase & {
       type: 'rect'
@@ -36,6 +56,13 @@ export type SceneLeaf =
       fontSize: number
       fill: string
       opacity: number
+      /** CSS font-family stack */
+      fontFamily: string
+      fontWeight: number
+      /** px */
+      letterSpacing: number
+      /** Unitless line height (e.g. 1.2) */
+      lineHeight: number
     })
   | (SceneNodeBase & {
       type: 'image'
@@ -54,6 +81,8 @@ export type SceneGroup = SceneNodeBase & {
   width: number
   height: number
   childIds: string[]
+  layout?: GroupLayout
+  exportRole?: HtmlExportRole
 }
 
 export type SceneInstance = SceneNodeBase & {

@@ -56,8 +56,13 @@ export function buildSvgFragmentLeaf(item: SceneLeaf): string {
       const ry = item.height / 2
       return `<ellipse cx="${svgNum(cx)}" cy="${svgNum(cy)}" rx="${svgNum(rx)}" ry="${svgNum(ry)}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${svgNum(item.strokeWidth)}"${opacityAttr(item.opacity)}/>`
     }
-    case 'text':
-      return `<text x="${svgNum(item.x)}" y="${svgNum(item.y + item.fontSize)}" font-size="${svgNum(item.fontSize)}" font-family="system-ui, sans-serif" fill="${escapeXml(item.fill)}"${opacityAttr(item.opacity)}>${escapeXml(item.content)}</text>`
+    case 'text': {
+      const ff = escapeXml(item.fontFamily || 'system-ui, sans-serif')
+      const fw = item.fontWeight ?? 400
+      const ls = item.letterSpacing ?? 0
+      const lh = item.lineHeight ?? 1.2
+      return `<text x="${svgNum(item.x)}" y="${svgNum(item.y + item.fontSize)}" font-size="${svgNum(item.fontSize)}" font-family="${ff}" font-weight="${fw}" letter-spacing="${svgNum(ls)}" fill="${escapeXml(item.fill)}"${opacityAttr(item.opacity)}><tspan style="line-height:${svgNum(lh)}">${escapeXml(item.content)}</tspan></text>`
+    }
     case 'image':
       return `<image href="${escapeXml(item.href)}" x="${svgNum(item.x)}" y="${svgNum(item.y)}" width="${svgNum(item.width)}" height="${svgNum(item.height)}" preserveAspectRatio="none"${opacityAttr(item.opacity)}/>`
   }
@@ -73,8 +78,13 @@ export function buildSvgFragmentLeafLocal(item: SceneLeaf): string {
       const ry = item.height / 2
       return `<ellipse cx="${svgNum(rx)}" cy="${svgNum(ry)}" rx="${svgNum(rx)}" ry="${svgNum(ry)}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${svgNum(item.strokeWidth)}"${opacityAttr(item.opacity)}/>`
     }
-    case 'text':
-      return `<text x="0" y="${svgNum(item.fontSize)}" font-size="${svgNum(item.fontSize)}" font-family="system-ui, sans-serif" fill="${escapeXml(item.fill)}"${opacityAttr(item.opacity)}>${escapeXml(item.content)}</text>`
+    case 'text': {
+      const ff = escapeXml(item.fontFamily || 'system-ui, sans-serif')
+      const fw = item.fontWeight ?? 400
+      const ls = item.letterSpacing ?? 0
+      const lh = item.lineHeight ?? 1.2
+      return `<text x="0" y="${svgNum(item.fontSize)}" font-size="${svgNum(item.fontSize)}" font-family="${ff}" font-weight="${fw}" letter-spacing="${svgNum(ls)}" fill="${escapeXml(item.fill)}"${opacityAttr(item.opacity)}><tspan style="line-height:${svgNum(lh)}">${escapeXml(item.content)}</tspan></text>`
+    }
     case 'image':
       return `<image href="${escapeXml(item.href)}" x="0" y="0" width="${svgNum(item.width)}" height="${svgNum(item.height)}" preserveAspectRatio="none"${opacityAttr(item.opacity)}/>`
   }

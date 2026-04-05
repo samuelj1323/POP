@@ -1,16 +1,20 @@
 :root {
-  --bg: #0f1117;
-  --surface: #181c27;
-  --surface-2: #222836;
-  --border: #2d3344;
-  --text: #e8eaef;
-  --muted: #8b93a7;
-  --accent: #7c9cff;
-  --accent-dim: rgba(124, 156, 255, 0.2);
-  --danger: #f87171;
-  --canvas-cell: #1a1e28;
-  --canvas-line: #2a3040;
+  /* Vite-adjacent violet + street-night base */
+  --bg: #0a0612;
+  --surface: #151022;
+  --surface-2: #1e1730;
+  --border: rgba(196, 181, 253, 0.2);
+  --text: #f4f0ff;
+  --muted: #9d8fb8;
+  --accent: #c4b5fd;
+  --accent-hot: #e879f9;
+  --accent-dim: rgba(196, 181, 253, 0.16);
+  --accent-glow: rgba(167, 139, 250, 0.45);
+  --danger: #fb7185;
+  --canvas-cell: #100c18;
+  --canvas-line: #2d2440;
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --display: 'Syne', system-ui, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
   color-scheme: dark;
   font-family: var(--sans);
@@ -29,6 +33,11 @@
 body {
   margin: 0;
   min-height: 100svh;
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(ellipse 90% 60% at 50% -15%, rgba(124, 58, 237, 0.14), transparent 55%),
+    linear-gradient(180deg, #0c0816 0%, var(--bg) 45%);
+  background-attachment: fixed;
 }
 
 #app {
@@ -47,9 +56,15 @@ body {
 
 .pop-title {
   margin: 0 0 0.35rem;
-  font-size: 1.75rem;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-family: var(--display);
+  font-size: 1.85rem;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  text-transform: uppercase;
+  background: linear-gradient(120deg, #f5f0ff 0%, #d8b4fe 55%, #c084fc 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .pop-sub {
@@ -71,37 +86,90 @@ body {
   margin-bottom: 1rem;
 }
 
+.pop-toolbar-wrap.pop-toolbar-pinned {
+  position: sticky;
+  top: 0;
+  z-index: 80;
+  margin-top: -0.25rem;
+  padding-top: 0.25rem;
+  padding-bottom: 0.35rem;
+  margin-bottom: calc(1rem - 0.35rem);
+  background: rgba(10, 6, 18, 0.82);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+
 .pop-toolbar-bar {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem 0.75rem;
+  align-items: flex-start;
+  gap: 0.65rem 0.75rem;
   padding: 0.75rem 1rem;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
 }
 
 .pop-toolbar-pin {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
+  justify-content: center;
   flex-shrink: 0;
+  width: 2.5rem;
+  height: 2.5rem;
+  padding: 0;
 }
 
 .pop-toolbar-pin-glyph {
-  font-size: 1rem;
+  font-size: 1.15rem;
   line-height: 1;
   opacity: 0.9;
 }
 
 .pop-toolbar-expanded {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.45rem 0.5rem;
   flex: 1;
-  min-width: min(100%, 12rem);
+  min-width: 0;
+}
+
+.pop-toolbar-sections {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.65rem;
+  width: 100%;
+}
+
+.pop-tb-section {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.pop-tb-section-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.12rem;
+  padding: 0.5rem 0.65rem 0.45rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.1);
+  box-shadow: inset 3px 0 0 0 rgba(167, 139, 250, 0.45);
+}
+
+.pop-tb-section-head .pop-tb-grid-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.pop-tb-section-head .pop-tb-grid-sub {
+  font-size: 0.68rem;
+  line-height: 1.25;
 }
 
 .pop-toolbar-hint {
@@ -116,19 +184,16 @@ body {
   display: none !important;
 }
 
-.pop-tb-dd {
+.pop-toolbar-sections .pop-tb-dd-panel {
   position: relative;
-  display: inline-flex;
-}
-
-.pop-tb-dd-panel {
-  min-width: 14rem;
-  max-width: min(22rem, calc(100vw - 1.5rem));
-  padding: 0.65rem 0.7rem 0.6rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  min-width: 0;
+  max-width: none;
+  width: 100%;
+  padding: 0.6rem 0.65rem 0.55rem;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .pop-tb-dd-panel[hidden] {
@@ -235,6 +300,11 @@ body {
   color: var(--muted);
 }
 
+.pop-tb-comp-done {
+  width: 100%;
+  margin-bottom: 0.5rem;
+}
+
 .pop-tb-comp-insert {
   margin-top: 0.75rem;
   padding-top: 0.65rem;
@@ -282,8 +352,8 @@ body {
 }
 
 .pop-btn:hover:not(:disabled) {
-  background: #2a3140;
-  border-color: #3d4558;
+  background: rgba(124, 58, 237, 0.18);
+  border-color: rgba(196, 181, 253, 0.35);
 }
 
 .pop-btn:disabled {
@@ -292,14 +362,15 @@ body {
 }
 
 .pop-tool-active {
-  border-color: var(--accent);
+  border-color: rgba(196, 181, 253, 0.55);
   background: var(--accent-dim);
   color: var(--accent);
 }
 
 .pop-primary {
-  border-color: #4d64b8;
-  background: rgba(124, 156, 255, 0.12);
+  border-color: rgba(167, 139, 250, 0.5);
+  background: rgba(124, 58, 237, 0.18);
+  color: var(--text);
 }
 
 .pop-danger {
@@ -464,8 +535,9 @@ body {
 .pop-layers {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 0.75rem 1rem;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
 }
 
 .pop-layers h2 {
@@ -662,23 +734,6 @@ body {
   color: var(--muted);
 }
 
-.pop-comp-banner {
-  position: relative;
-  z-index: 2100;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-bottom: 0.75rem;
-  padding: 0.55rem 0.85rem;
-  border-radius: 8px;
-  background: var(--accent-dim);
-  border: 1px solid var(--accent);
-  font-size: 0.88rem;
-  color: var(--text);
-}
-
 .pop-comp-insert {
   display: inline-flex;
   align-items: center;
@@ -812,7 +867,7 @@ body {
 
 .pop-canvas-wrap {
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   overflow: auto;
   /* Solid fill only: the artboard grid lives in SVG (#pop-grid). A CSS grid here used
      fixed 16px cells while the SVG pattern scales with display size, so two misaligned
@@ -853,5 +908,5 @@ body {
 }
 
 .pop-item-selected > :first-child {
-  filter: drop-shadow(0 0 4px rgba(124, 156, 255, 0.85));
+  filter: drop-shadow(0 0 6px var(--accent-glow));
 }

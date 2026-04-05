@@ -19,6 +19,16 @@ import {
 import type { ResizeHandleId } from './studio/layout-geometry.ts'
 import { clamp } from './studio/math.ts'
 import {
+  computeWorldBounds,
+  createDefaultFrame,
+  documentToV3Json,
+  loadDocumentV3,
+  migrateV2ToV3,
+  type DesignTokens,
+  type PopDocumentV3,
+  type PopFrame,
+} from './studio/document.ts'
+import {
   defsToRecord,
   isValidCanvasItem,
   migrateV1ToScene,
@@ -27,18 +37,20 @@ import {
   recordToNodes,
   STORAGE_KEY_V1,
   STORAGE_KEY_V2,
+  STORAGE_KEY_V3,
 } from './studio/persistence.ts'
-
 const TOOLBAR_PIN_STORAGE_KEY = 'pop-toolbar-pinned'
 import type { PersistedStateV1, PersistedStateV2 } from './studio/persistence.ts'
 import type {
   ComponentDefinition,
   DefNode,
+  GroupLayout,
   SceneGroup,
   SceneLeaf,
   SceneNode,
   Tool,
 } from './studio/scene-types.ts'
+import type { SnapBounds } from './studio/snap.ts'
 import { collectSnapTargetsX, collectSnapTargetsY, snapAxis } from './studio/snap.ts'
 import {
   buildSvgFragmentLeafLocal,
@@ -48,23 +60,53 @@ import {
   serializeSceneSubtreeSvg,
   serializeSvgFromRoots,
 } from './studio/svg-export.ts'
+import { downloadHtml, exportFrameToHtml } from './studio/html-export.ts'
 
 export function mount(root: HTMLElement): void {
-  let rootIds: string[] = []
+  let frames: PopFrame[] = [createDefaultFrame()]
+  let activeFrameId = frames[0]!.id
+  let docName = 'Untitled'
+  let tokens: DesignTokens = {}
+  /** When editing a component, scene roots are not frame roots. */
+  let componentEditRoots: string[] | null = null
   let nodes = new Map<string, SceneNode>()
   let definitions = new Map<string, ComponentDefinition>()
   /** When set, canvas shows definition tree for editing the main component. */
   let editingComponentId: string | null = null
   let mainNodesBackup: Map<string, SceneNode> | null = null
   let mainRootIdsBackup: string[] | null = null
+  let worldW = VIEW_W
+  let worldH = VIEW_H
+
+  function getActiveFrame(): PopFrame {
+    const f = frames.find((x) => x.id === activeFrameId)
+    if (f) return f
+    return frames[0]!
+  }
+
+  function roots(): string[] {
+    if (componentEditRoots !== null) return componentEditRoots
+    return getActiveFrame().rootIds
+  }
+
+  function snapBoundsForFrame(): SnapBounds {
+    const f = getActiveFrame()
+    return { x: f.x, y: f.y, width: f.width, height: f.height }
+  }
+
+  function recomputeWorldSize(): void {
+    const b = computeWorldBounds(frames, VIEW_W, VIEW_H)
+    worldW = b.worldW
+    worldH = b.worldH
+  }
   /** Custom layer names by item id; when missing, UI falls back to `itemLabel`. */
   let layerNames: Record<string, string> = {}
   let selected = new Set<string>()
   /** Left sidebar: layer tree vs parent-chain helper (Figma-style hierarchy). */
   let layersAsideTab: 'layers' | 'parent' = 'layers'
   let tool: Tool = 'select'
-  let defaultFill = '#3b82f6'
-  let defaultStroke = '#1e3a5f'
+  let defaultFill = '#a78bfa'
+  let defaultStroke = '#4c1d95'
   let defaultStrokeWidth = 2
   let symmetryGuidesOn = true
   let propsPanelFocused = false
@@ -114,122 +156,172 @@ export function mount(root: HTMLElement): void {
       </header>
       <div class="pop-toolbar-wrap" id="pop-toolbar-wrap">
         <div class="pop-toolbar-bar">
-          <button type="button" class="pop-btn pop-toolbar-pin" id="pop-toolbar-pin" aria-pressed="false" aria-expanded="false" aria-controls="pop-toolbar-expanded">
+          <button type="button" class="pop-btn pop-toolbar-pin" id="pop-toolbar-pin" aria-pressed="false" aria-expanded="false" aria-controls="pop-toolbar-expanded" aria-label="Pin toolbar" title="Pin toolbar">
             <span class="pop-toolbar-pin-glyph" aria-hidden="true">📌</span>
-            <span class="pop-toolbar-pin-label">Pin toolbar</span>
           </button>
-          <div class="pop-toolbar-expanded" id="pop-toolbar-expanded" role="toolbar" aria-label="Studio tools" hidden>
-            <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-tools-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-tools-panel">Tools</button>
-              <div class="pop-tb-dd-panel" id="pop-tb-tools-panel" role="region" aria-labelledby="pop-tb-tools-btn" hidden>
-                <p class="pop-tb-dd-desc" id="pop-tb-tools-desc">Pick what you draw on the canvas next.</p>
-                <div class="pop-tb-grid pop-tb-grid-tools" role="group" aria-describedby="pop-tb-tools-desc">
-                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="select" aria-pressed="true">
-                    <span class="pop-tb-grid-title">Select</span>
-                    <span class="pop-tb-grid-sub">Move and resize</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="rect" aria-pressed="false">
-                    <span class="pop-tb-grid-title">Rectangle</span>
-                    <span class="pop-tb-grid-sub">Filled box</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="ellipse" aria-pressed="false">
-                    <span class="pop-tb-grid-title">Ellipse</span>
-                    <span class="pop-tb-grid-sub">Circle or oval</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="text" aria-pressed="false">
-                    <span class="pop-tb-grid-title">Text</span>
-                    <span class="pop-tb-grid-sub">Place a label</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="image" aria-pressed="false">
-                    <span class="pop-tb-grid-title">Image</span>
-                    <span class="pop-tb-grid-sub">Embed raster</span>
-                  </button>
+          <div class="pop-toolbar-expanded" id="pop-toolbar-expanded" hidden>
+            <div class="pop-toolbar-sections">
+              <section class="pop-tb-section" aria-labelledby="pop-tb-tools-h">
+                <div class="pop-tb-section-head" id="pop-tb-tools-h">
+                  <span class="pop-tb-grid-title">Tools</span>
+                  <span class="pop-tb-grid-sub">Pick drawing mode</span>
                 </div>
-              </div>
-            </div>
-            <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-view-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-view-panel">View</button>
-              <div class="pop-tb-dd-panel" id="pop-tb-view-panel" role="region" aria-labelledby="pop-tb-view-btn" hidden>
-                <p class="pop-tb-dd-desc">Zoom the canvas; reset returns to 100% and centered pan.</p>
-                <div class="pop-tb-grid pop-tb-grid-view" role="group" aria-label="Canvas zoom">
-                  <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
-                  <span class="pop-zoom-pct pop-tb-zoom-readout" id="pop-zoom-pct" aria-live="polite">100%</span>
-                  <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
-                  <button type="button" class="pop-btn pop-tb-span2" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset view</button>
-                </div>
-              </div>
-            </div>
-            <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-export-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-export-panel">Export</button>
-              <div class="pop-tb-dd-panel" id="pop-tb-export-panel" role="region" aria-labelledby="pop-tb-export-btn" hidden>
-                <p class="pop-tb-dd-desc">Save SVG to your device.</p>
-                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Export">
-                  <button type="button" class="pop-btn pop-primary pop-tb-grid-btn" id="pop-export-sel">
-                    <span class="pop-tb-grid-title">Selection</span>
-                    <span class="pop-tb-grid-sub">SVG of picked layers</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-export-all">
-                    <span class="pop-tb-grid-title">Full canvas</span>
-                    <span class="pop-tb-grid-sub">Everything on the artboard</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-arrange-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-arrange-panel">Selection</button>
-              <div class="pop-tb-dd-panel" id="pop-tb-arrange-panel" role="region" aria-labelledby="pop-tb-arrange-btn" hidden>
-                <p class="pop-tb-dd-desc">Organize the layers you have selected in the list or on the canvas.</p>
-                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Selection actions">
-                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-group" disabled>
-                    <span class="pop-tb-grid-title">Group</span>
-                    <span class="pop-tb-grid-sub">Merge into one folder</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-ungroup" disabled>
-                    <span class="pop-tb-grid-title">Ungroup</span>
-                    <span class="pop-tb-grid-sub">Split one group</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-danger pop-tb-grid-btn pop-tb-span2" id="pop-delete" disabled>
-                    <span class="pop-tb-grid-title">Delete</span>
-                    <span class="pop-tb-grid-sub">Remove selected layers</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-comp-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-comp-panel">Components</button>
-              <div class="pop-tb-dd-panel pop-tb-comp-panel" id="pop-tb-comp-panel" role="region" aria-labelledby="pop-tb-comp-btn" hidden>
-                <p class="pop-tb-dd-desc">Reusable symbols and instances.</p>
-                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Component actions">
-                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-create-comp" disabled>
-                    <span class="pop-tb-grid-title">Create component</span>
-                    <span class="pop-tb-grid-sub">From selection</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-detach" disabled>
-                    <span class="pop-tb-grid-title">Detach instance</span>
-                    <span class="pop-tb-grid-sub">Edit as raw layers</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tb-grid-btn pop-tb-span2" id="pop-edit-comp" disabled>
-                    <span class="pop-tb-grid-title">Edit main</span>
-                    <span class="pop-tb-grid-sub">Open component definition</span>
-                  </button>
-                </div>
-                <div class="pop-tb-comp-insert">
-                  <span class="pop-tb-style-lbl">Insert instance</span>
-                  <div class="pop-tb-comp-insert-row">
-                    <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
-                    <button type="button" class="pop-btn" id="pop-insert-inst">Place</button>
+                <div class="pop-tb-dd-panel" id="pop-tb-tools-panel" aria-labelledby="pop-tb-tools-h">
+                  <p class="pop-tb-dd-desc" id="pop-tb-tools-desc">Pick what you draw on the canvas next.</p>
+                  <div class="pop-tb-grid pop-tb-grid-tools" role="group" aria-describedby="pop-tb-tools-desc">
+                    <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="select" aria-pressed="true">
+                      <span class="pop-tb-grid-title">Select</span>
+                      <span class="pop-tb-grid-sub">Move and resize</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="rect" aria-pressed="false">
+                      <span class="pop-tb-grid-title">Rectangle</span>
+                      <span class="pop-tb-grid-sub">Filled box</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="ellipse" aria-pressed="false">
+                      <span class="pop-tb-grid-title">Ellipse</span>
+                      <span class="pop-tb-grid-sub">Circle or oval</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="text" aria-pressed="false">
+                      <span class="pop-tb-grid-title">Text</span>
+                      <span class="pop-tb-grid-sub">Place a label</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="image" aria-pressed="false">
+                      <span class="pop-tb-grid-title">Image</span>
+                      <span class="pop-tb-grid-sub">Embed raster</span>
+                    </button>
                   </div>
                 </div>
-              </div>
+              </section>
+              <section class="pop-tb-section" aria-labelledby="pop-tb-view-h">
+                <div class="pop-tb-section-head" id="pop-tb-view-h">
+                  <span class="pop-tb-grid-title">View</span>
+                  <span class="pop-tb-grid-sub">Zoom and pan</span>
+                </div>
+                <div class="pop-tb-dd-panel" id="pop-tb-view-panel" aria-labelledby="pop-tb-view-h">
+                  <p class="pop-tb-dd-desc">Zoom the canvas; reset returns to 100% and centered pan.</p>
+                  <div class="pop-tb-grid pop-tb-grid-view" role="group" aria-label="Canvas zoom">
+                    <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
+                    <span class="pop-zoom-pct pop-tb-zoom-readout" id="pop-zoom-pct" aria-live="polite">100%</span>
+                    <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
+                    <button type="button" class="pop-btn pop-tb-span2" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset view</button>
+                  </div>
+                </div>
+              </section>
+              <section class="pop-tb-section" aria-labelledby="pop-tb-doc-h">
+                <div class="pop-tb-section-head" id="pop-tb-doc-h">
+                  <span class="pop-tb-grid-title">Document</span>
+                  <span class="pop-tb-grid-sub">Frames and file</span>
+                </div>
+                <div class="pop-tb-dd-panel" id="pop-tb-doc-panel" aria-labelledby="pop-tb-doc-h">
+                  <p class="pop-tb-dd-desc">Frames are sized artboards. Save or load the whole document as JSON.</p>
+                  <label class="pop-tb-style-lbl" for="pop-frame-pick">Active frame</label>
+                  <div class="pop-tb-comp-insert-row">
+                    <select id="pop-frame-pick" class="pop-comp-pick" aria-label="Active frame"></select>
+                    <button type="button" class="pop-btn" id="pop-frame-add" title="Add a new empty frame">+ Frame</button>
+                  </div>
+                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Document file">
+                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-doc-open">
+                      <span class="pop-tb-grid-title">Open</span>
+                      <span class="pop-tb-grid-sub">Load .json</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-primary pop-tb-grid-btn" id="pop-doc-save">
+                      <span class="pop-tb-grid-title">Save</span>
+                      <span class="pop-tb-grid-sub">Download .json</span>
+                    </button>
+                  </div>
+                </div>
+              </section>
+              <section class="pop-tb-section" aria-labelledby="pop-tb-export-h">
+                <div class="pop-tb-section-head" id="pop-tb-export-h">
+                  <span class="pop-tb-grid-title">Export</span>
+                  <span class="pop-tb-grid-sub">SVG and HTML</span>
+                </div>
+                <div class="pop-tb-dd-panel" id="pop-tb-export-panel" aria-labelledby="pop-tb-export-h">
+                  <p class="pop-tb-dd-desc">SVG for vectors; HTML for a web handoff of the active frame (or all frames).</p>
+                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Export SVG">
+                    <button type="button" class="pop-btn pop-primary pop-tb-grid-btn" id="pop-export-sel">
+                      <span class="pop-tb-grid-title">Selection</span>
+                      <span class="pop-tb-grid-sub">SVG of picked layers</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-export-all">
+                      <span class="pop-tb-grid-title">Active frame</span>
+                      <span class="pop-tb-grid-sub">SVG of frame</span>
+                    </button>
+                  </div>
+                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Export HTML">
+                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-export-html">
+                      <span class="pop-tb-grid-title">HTML</span>
+                      <span class="pop-tb-grid-sub">Active frame</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-export-html-all">
+                      <span class="pop-tb-grid-title">HTML all</span>
+                      <span class="pop-tb-grid-sub">Each frame</span>
+                    </button>
+                  </div>
+                </div>
+              </section>
+              <section class="pop-tb-section" aria-labelledby="pop-tb-arrange-h">
+                <div class="pop-tb-section-head" id="pop-tb-arrange-h">
+                  <span class="pop-tb-grid-title">Selection</span>
+                  <span class="pop-tb-grid-sub">Group and order</span>
+                </div>
+                <div class="pop-tb-dd-panel" id="pop-tb-arrange-panel" aria-labelledby="pop-tb-arrange-h">
+                  <p class="pop-tb-dd-desc">Organize the layers you have selected in the list or on the canvas.</p>
+                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Selection actions">
+                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-group" disabled>
+                      <span class="pop-tb-grid-title">Group</span>
+                      <span class="pop-tb-grid-sub">Merge into one folder</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-ungroup" disabled>
+                      <span class="pop-tb-grid-title">Ungroup</span>
+                      <span class="pop-tb-grid-sub">Split one group</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-danger pop-tb-grid-btn pop-tb-span2" id="pop-delete" disabled>
+                      <span class="pop-tb-grid-title">Delete</span>
+                      <span class="pop-tb-grid-sub">Remove selected layers</span>
+                    </button>
+                  </div>
+                </div>
+              </section>
+              <section class="pop-tb-section" aria-labelledby="pop-tb-comp-h">
+                <div class="pop-tb-section-head" id="pop-tb-comp-h">
+                  <span class="pop-tb-grid-title">Components</span>
+                  <span class="pop-tb-grid-sub">Symbols and instances</span>
+                </div>
+                <div class="pop-tb-dd-panel pop-tb-comp-panel" id="pop-tb-comp-panel" aria-labelledby="pop-tb-comp-h">
+                  <p class="pop-tb-dd-desc">Reusable symbols and instances.</p>
+                  <button type="button" class="pop-btn pop-primary pop-tb-comp-done" id="pop-comp-done" hidden>
+                    Done editing
+                  </button>
+                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Component actions">
+                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-create-comp" disabled>
+                      <span class="pop-tb-grid-title">Create component</span>
+                      <span class="pop-tb-grid-sub">From selection</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-detach" disabled>
+                      <span class="pop-tb-grid-title">Detach instance</span>
+                      <span class="pop-tb-grid-sub">Edit as raw layers</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-tb-span2" id="pop-edit-comp" disabled>
+                      <span class="pop-tb-grid-title">Edit main</span>
+                      <span class="pop-tb-grid-sub">Open component definition</span>
+                    </button>
+                  </div>
+                  <div class="pop-tb-comp-insert">
+                    <span class="pop-tb-style-lbl">Insert instance</span>
+                    <div class="pop-tb-comp-insert-row">
+                      <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
+                      <button type="button" class="pop-btn" id="pop-insert-inst">Place</button>
+                    </div>
+                  </div>
+                </div>
+              </section>
             </div>
             <input type="file" id="pop-file" accept="image/*" hidden />
+            <input type="file" id="pop-doc-file" accept="application/json,.json" hidden />
           </div>
         </div>
         <p class="pop-toolbar-hint" id="pop-toolbar-hint">Toolbar is hidden. Pin it to use tools, zoom, and export.</p>
-      </div>
-      <div class="pop-comp-banner" id="pop-comp-banner" hidden>
-        <span id="pop-comp-banner-text"></span>
-        <button type="button" class="pop-btn pop-primary" id="pop-comp-done">Done editing</button>
       </div>
       <div class="pop-main">
         <aside class="pop-layers" aria-label="Layers, transform, and style">
@@ -266,7 +358,7 @@ export function mount(root: HTMLElement): void {
                 <span class="pop-tb-style-lbl">Fill</span>
                 <div class="pop-color-picker">
                   <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
-                  <input type="color" class="pop-color-native" id="pop-fill" value="#3b82f6" tabindex="-1" />
+                  <input type="color" class="pop-color-native" id="pop-fill" value="#a78bfa" tabindex="-1" />
                   <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
                     <div class="pop-color-panel-cap">Theme colors</div>
                     <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
@@ -281,7 +373,7 @@ export function mount(root: HTMLElement): void {
                   <span class="pop-tb-style-lbl">Stroke</span>
                   <div class="pop-color-picker">
                     <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
-                    <input type="color" class="pop-color-native" id="pop-stroke" value="#1e3a5f" tabindex="-1" />
+                    <input type="color" class="pop-color-native" id="pop-stroke" value="#4c1d95" tabindex="-1" />
                     <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
                       <div class="pop-color-panel-cap">Theme colors</div>
                       <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
@@ -306,6 +398,31 @@ export function mount(root: HTMLElement): void {
               </label>
             </div>
           </div>
+          <div class="pop-props" id="pop-typography-props" hidden>
+            <h2>Typography</h2>
+            <p class="pop-style-section-desc">When a text layer is selected.</p>
+            <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Font family</span><input type="text" id="pop-font-family" class="pop-num" spellcheck="false" /></label>
+            <div class="pop-prop-grid">
+              <label class="pop-field"><span class="pop-field-lbl">Weight</span><input type="number" id="pop-font-weight" class="pop-num" min="100" max="900" step="100" /></label>
+              <label class="pop-field"><span class="pop-field-lbl">Letter px</span><input type="number" id="pop-letter-spacing" class="pop-num" step="0.5" /></label>
+            </div>
+            <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Line height</span><input type="number" id="pop-line-height" class="pop-num" min="0.5" max="3" step="0.05" /></label>
+          </div>
+          <div class="pop-props" id="pop-group-layout-props" hidden>
+            <h2>Layout</h2>
+            <p class="pop-style-section-desc">Group stack for HTML export (flexbox).</p>
+            <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Mode</span>
+              <select id="pop-group-layout" aria-label="Group layout mode">
+                <option value="none">Freeform</option>
+                <option value="stack-v">Stack vertical</option>
+                <option value="stack-h">Stack horizontal</option>
+              </select>
+            </label>
+            <div class="pop-prop-grid">
+              <label class="pop-field"><span class="pop-field-lbl">Gap</span><input type="number" id="pop-group-gap" class="pop-num" min="0" step="1" /></label>
+              <label class="pop-field"><span class="pop-field-lbl">Padding</span><input type="number" id="pop-group-pad" class="pop-num" min="0" step="1" /></label>
+            </div>
+          </div>
           <div class="pop-props">
             <div class="pop-symmetry">
               <label class="pop-check"><input type="checkbox" id="pop-guides" checked /><span>Symmetry guides &amp; snap</span></label>
@@ -321,8 +438,9 @@ export function mount(root: HTMLElement): void {
                 <path d="M 16 0 L 0 0 0 16" fill="none" stroke="var(--canvas-line)" stroke-width="0.5"/>
               </pattern>
             </defs>
-            <rect class="pop-canvas-bg" x="0" y="0" width="${VIEW_W}" height="${VIEW_H}" fill="url(#pop-grid)" pointer-events="none"/>
+            <rect class="pop-canvas-bg" id="pop-canvas-bg" x="0" y="0" width="${VIEW_W}" height="${VIEW_H}" fill="url(#pop-grid)" pointer-events="none"/>
             <g id="pop-viewport" transform="translate(0 0) scale(1)">
+              <g id="pop-frame-outlines" pointer-events="none"></g>
               <g id="pop-guides-back" pointer-events="none"></g>
               <g id="pop-items"></g>
               <g id="pop-handles"></g>
@@ -361,8 +479,6 @@ export function mount(root: HTMLElement): void {
   const btnEditComp = root.querySelector<HTMLButtonElement>('#pop-edit-comp')!
   const selCompPick = root.querySelector<HTMLSelectElement>('#pop-comp-pick')!
   const btnInsertInst = root.querySelector<HTMLButtonElement>('#pop-insert-inst')!
-  const compBanner = root.querySelector<HTMLElement>('#pop-comp-banner')!
-  const compBannerText = root.querySelector<HTMLElement>('#pop-comp-banner-text')!
   const btnCompDone = root.querySelector<HTMLButtonElement>('#pop-comp-done')!
   const toolButtons = root.querySelectorAll<HTMLButtonElement>('.pop-tool')
   const guidesBack = root.querySelector<SVGGElement>('#pop-guides-back')!
@@ -398,22 +514,31 @@ export function mount(root: HTMLElement): void {
   const btnZoomOut = root.querySelector<HTMLButtonElement>('#pop-zoom-out')!
   const btnZoomReset = root.querySelector<HTMLButtonElement>('#pop-zoom-reset')!
   const elZoomPct = root.querySelector<HTMLElement>('#pop-zoom-pct')!
+  const canvasBgEl = root.querySelector<SVGRectElement>('#pop-canvas-bg')!
+  const frameOutlinesG = root.querySelector<SVGGElement>('#pop-frame-outlines')!
+  const popFramePick = root.querySelector<HTMLSelectElement>('#pop-frame-pick')!
+  const btnFrameAdd = root.querySelector<HTMLButtonElement>('#pop-frame-add')!
+  const btnDocOpen = root.querySelector<HTMLButtonElement>('#pop-doc-open')!
+  const btnDocSave = root.querySelector<HTMLButtonElement>('#pop-doc-save')!
+  const docFileInput = root.querySelector<HTMLInputElement>('#pop-doc-file')!
+  const btnExportHtml = root.querySelector<HTMLButtonElement>('#pop-export-html')!
+  const btnExportHtmlAll = root.querySelector<HTMLButtonElement>('#pop-export-html-all')!
+  const typographyProps = root.querySelector<HTMLElement>('#pop-typography-props')!
+  const inpFontFamily = root.querySelector<HTMLInputElement>('#pop-font-family')!
+  const inpFontWeight = root.querySelector<HTMLInputElement>('#pop-font-weight')!
+  const inpLetterSpacing = root.querySelector<HTMLInputElement>('#pop-letter-spacing')!
+  const inpLineHeight = root.querySelector<HTMLInputElement>('#pop-line-height')!
+  const groupLayoutProps = root.querySelector<HTMLElement>('#pop-group-layout-props')!
+  const selGroupLayout = root.querySelector<HTMLSelectElement>('#pop-group-layout')!
+  const inpGroupGap = root.querySelector<HTMLInputElement>('#pop-group-gap')!
+  const inpGroupPad = root.querySelector<HTMLInputElement>('#pop-group-pad')!
   const toolbarWrap = root.querySelector<HTMLElement>('#pop-toolbar-wrap')!
   const btnToolbarPin = root.querySelector<HTMLButtonElement>('#pop-toolbar-pin')!
   const toolbarExpanded = root.querySelector<HTMLElement>('#pop-toolbar-expanded')!
   const toolbarHint = root.querySelector<HTMLElement>('#pop-toolbar-hint')!
-  const pinLabelEl = btnToolbarPin.querySelector<HTMLElement>('.pop-toolbar-pin-label')!
 
   /** Pinned unless user chose to hide (`'0'` in storage). */
   let toolbarPinned = localStorage.getItem(TOOLBAR_PIN_STORAGE_KEY) !== '0'
-  let openTbDropdown: { panel: HTMLElement; trigger: HTMLButtonElement } | null = null
-
-  function closeTbDropdown(): void {
-    if (!openTbDropdown) return
-    openTbDropdown.panel.hidden = true
-    openTbDropdown.trigger.setAttribute('aria-expanded', 'false')
-    openTbDropdown = null
-  }
 
   function updateFillSwatch(): void {
     fillSwatch.style.backgroundColor = fillInput.value
@@ -439,20 +564,6 @@ export function mount(root: HTMLElement): void {
     openColorPicker = null
   }
 
-  function panelRectIntersectsBanner(
-    left: number,
-    top: number,
-    pw: number,
-    ph: number,
-  ): boolean {
-    if (compBanner.hidden) return false
-    const br = compBanner.getBoundingClientRect()
-    if (br.width === 0 || br.height === 0) return false
-    const prRight = left + pw
-    const prBottom = top + ph
-    return !(prRight <= br.left || left >= br.right || prBottom <= br.top || top >= br.bottom)
-  }
-
   function positionColorPanel(panel: HTMLElement, swatch: HTMLButtonElement): void {
     panel.style.position = 'fixed'
     panel.style.zIndex = '2000'
@@ -470,79 +581,8 @@ export function mount(root: HTMLElement): void {
       top = Math.max(margin, r.top - ph - margin)
     }
 
-    if (panelRectIntersectsBanner(left, top, pw, ph)) {
-      const above = r.top - ph - margin
-      if (above >= margin && !panelRectIntersectsBanner(left, above, pw, ph)) {
-        top = above
-      } else {
-        const br = compBanner.getBoundingClientRect()
-        const belowBanner = br.bottom + margin
-        if (belowBanner + ph <= window.innerHeight - margin) {
-          top = belowBanner
-        } else if (above >= margin) {
-          top = above
-        }
-      }
-    }
-
     panel.style.left = `${left}px`
     panel.style.top = `${top}px`
-  }
-
-  function positionTbDropdown(panel: HTMLElement, trigger: HTMLElement): void {
-    panel.style.position = 'fixed'
-    panel.style.zIndex = '1999'
-    const r = trigger.getBoundingClientRect()
-    const margin = 8
-    const pw = panel.offsetWidth
-    const ph = panel.offsetHeight
-    let left = r.left
-    let top = r.bottom + margin
-    if (left + pw > window.innerWidth - margin) {
-      left = Math.max(margin, window.innerWidth - pw - margin)
-    }
-    if (left < margin) left = margin
-    if (top + ph > window.innerHeight - margin) {
-      top = Math.max(margin, r.top - ph - margin)
-    }
-
-    if (panelRectIntersectsBanner(left, top, pw, ph)) {
-      const above = r.top - ph - margin
-      if (above >= margin && !panelRectIntersectsBanner(left, above, pw, ph)) {
-        top = above
-      } else {
-        const br = compBanner.getBoundingClientRect()
-        const belowBanner = br.bottom + margin
-        if (belowBanner + ph <= window.innerHeight - margin) {
-          top = belowBanner
-        } else if (above >= margin) {
-          top = above
-        }
-      }
-    }
-
-    panel.style.left = `${left}px`
-    panel.style.top = `${top}px`
-  }
-
-  function openTbDropdownPanel(panel: HTMLElement, trigger: HTMLButtonElement): void {
-    closeColorPickerPanel()
-    closeTbDropdown()
-    panel.hidden = false
-    trigger.setAttribute('aria-expanded', 'true')
-    openTbDropdown = { panel, trigger }
-    requestAnimationFrame(() => {
-      positionTbDropdown(panel, trigger)
-      requestAnimationFrame(() => positionTbDropdown(panel, trigger))
-    })
-  }
-
-  function toggleTbDropdownPanel(panel: HTMLElement, trigger: HTMLButtonElement): void {
-    if (openTbDropdown?.panel === panel) {
-      closeTbDropdown()
-      return
-    }
-    openTbDropdownPanel(panel, trigger)
   }
 
   function toggleColorPickerPanel(panel: HTMLElement, swatch: HTMLButtonElement): void {
@@ -550,7 +590,6 @@ export function mount(root: HTMLElement): void {
       closeColorPickerPanel()
       return
     }
-    closeTbDropdown()
     closeColorPickerPanel()
     panel.hidden = false
     swatch.setAttribute('aria-expanded', 'true')
@@ -616,11 +655,6 @@ export function mount(root: HTMLElement): void {
     'pointerdown',
     (ev) => {
       const t = ev.target as Node
-      if (openTbDropdown) {
-        if (!openTbDropdown.panel.contains(t) && !openTbDropdown.trigger.contains(t)) {
-          closeTbDropdown()
-        }
-      }
       if (!openColorPicker) return
       if (openColorPicker.panel.contains(t) || openColorPicker.swatch.contains(t)) return
       closeColorPickerPanel()
@@ -630,19 +664,16 @@ export function mount(root: HTMLElement): void {
 
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape') {
-      closeTbDropdown()
       closeColorPickerPanel()
     }
   })
 
   window.addEventListener('resize', () => {
-    closeTbDropdown()
     closeColorPickerPanel()
   })
   window.addEventListener(
     'scroll',
     () => {
-      closeTbDropdown()
       closeColorPickerPanel()
     },
     true,
@@ -654,9 +685,10 @@ export function mount(root: HTMLElement): void {
     btnToolbarPin.setAttribute('aria-pressed', String(toolbarPinned))
     btnToolbarPin.setAttribute('aria-expanded', String(toolbarPinned))
     toolbarWrap.classList.toggle('pop-toolbar-pinned', toolbarPinned)
-    pinLabelEl.textContent = toolbarPinned ? 'Unpin toolbar' : 'Pin toolbar'
+    const pinLabel = toolbarPinned ? 'Unpin toolbar' : 'Pin toolbar'
+    btnToolbarPin.setAttribute('aria-label', pinLabel)
+    btnToolbarPin.setAttribute('title', pinLabel)
     if (!toolbarPinned) {
-      closeTbDropdown()
       closeColorPickerPanel()
     }
   }
@@ -666,36 +698,6 @@ export function mount(root: HTMLElement): void {
     localStorage.setItem(TOOLBAR_PIN_STORAGE_KEY, toolbarPinned ? '1' : '0')
     applyToolbarPinState()
   })
-
-  root.querySelectorAll<HTMLElement>('[data-pop-tb-dd]').forEach((wrap) => {
-    const trigger = wrap.querySelector<HTMLButtonElement>('.pop-tb-dd-trigger')
-    const panel = wrap.querySelector<HTMLElement>('.pop-tb-dd-panel')
-    if (!trigger || !panel) return
-    trigger.addEventListener('click', (e) => {
-      e.preventDefault()
-      e.stopPropagation()
-      if (!toolbarPinned) return
-      toggleTbDropdownPanel(panel, trigger)
-    })
-  })
-
-  toolbarExpanded.addEventListener(
-    'click',
-    (e) => {
-      if (!openTbDropdown) return
-      const hit = e.target as HTMLElement
-      if (hit.closest('.pop-tb-dd-trigger')) return
-      if (hit.closest('.pop-color-panel')) return
-      if (hit.closest('.pop-color-swatch')) return
-      if (hit.closest('input[type="range"]')) return
-      if (hit.closest('select')) return
-      if (!openTbDropdown.panel.contains(hit)) return
-      if (hit.closest('button')) {
-        queueMicrotask(() => closeTbDropdown())
-      }
-    },
-    true,
-  )
 
   applyToolbarPinState()
 
@@ -733,23 +735,29 @@ export function mount(root: HTMLElement): void {
     }
   }
 
+  function buildDocumentV3(): PopDocumentV3 {
+    return {
+      v: 3,
+      meta: { name: docName, updatedAt: new Date().toISOString() },
+      tokens,
+      frames: JSON.parse(JSON.stringify(frames)) as PopFrame[],
+      activeFrameId,
+      nodes: nodesToRecord(nodes),
+      layerNames: { ...layerNames },
+      definitions: defsToRecord(definitions),
+      defaultFill,
+      defaultStroke,
+      defaultStrokeWidth,
+      symmetryGuidesOn,
+      viewTx,
+      viewTy,
+      viewScale,
+    }
+  }
+
   function persistToStorage(): void {
     try {
-      const payload: PersistedStateV2 = {
-        v: 2,
-        rootIds: [...rootIds],
-        nodes: nodesToRecord(nodes),
-        layerNames: { ...layerNames },
-        definitions: defsToRecord(definitions),
-        defaultFill,
-        defaultStroke,
-        defaultStrokeWidth,
-        symmetryGuidesOn,
-        viewTx,
-        viewTy,
-        viewScale,
-      }
-      localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(payload))
+      localStorage.setItem(STORAGE_KEY_V3, JSON.stringify(buildDocumentV3()))
     } catch {
       /* quota or private mode */
     }
@@ -802,43 +810,86 @@ export function mount(root: HTMLElement): void {
     }
   }
 
+  function applyDocumentV3(doc: PopDocumentV3): void {
+    docName = doc.meta.name
+    tokens = doc.tokens ?? {}
+    frames = JSON.parse(JSON.stringify(doc.frames)) as PopFrame[]
+    activeFrameId = doc.activeFrameId
+    if (!frames.some((f) => f.id === activeFrameId)) activeFrameId = frames[0]!.id
+    nodes = recordToNodes(doc.nodes as Record<string, unknown>)
+    definitions = recordToDefs(doc.definitions as Record<string, unknown>)
+    layerNames = { ...doc.layerNames }
+    defaultFill = doc.defaultFill
+    defaultStroke = doc.defaultStroke
+    defaultStrokeWidth = doc.defaultStrokeWidth
+    symmetryGuidesOn = doc.symmetryGuidesOn
+    fillInput.value = defaultFill
+    strokeInput.value = defaultStroke
+    strokeWInput.value = String(defaultStrokeWidth)
+    guidesCheckbox.checked = symmetryGuidesOn
+    componentEditRoots = null
+    editingComponentId = null
+    applyLoadedView(doc)
+    const keepIds = new Set(nodes.keys())
+    for (const k of Object.keys(layerNames)) {
+      if (!keepIds.has(k)) delete layerNames[k]
+    }
+    recomputeWorldSize()
+  }
+
   try {
-    const rawV2 = localStorage.getItem(STORAGE_KEY_V2)
-    if (rawV2) {
-      const data = JSON.parse(rawV2) as Partial<PersistedStateV2>
-      if (data.v === 2 && data.nodes && typeof data.nodes === 'object' && Array.isArray(data.rootIds)) {
-        nodes = recordToNodes(data.nodes as Record<string, unknown>)
-        rootIds = data.rootIds.filter((id) => nodes.has(id))
-        if (data.definitions && typeof data.definitions === 'object') {
-          definitions = recordToDefs(data.definitions as Record<string, unknown>)
-        }
-        if (data.layerNames && typeof data.layerNames === 'object') {
-          layerNames = { ...data.layerNames }
-        }
-        editingComponentId = null
-        const keepIds = new Set(nodes.keys())
-        for (const k of Object.keys(layerNames)) {
-          if (!keepIds.has(k)) delete layerNames[k]
-        }
-        applyLoadedView(data)
-      }
+    const rawV3 = localStorage.getItem(STORAGE_KEY_V3)
+    if (rawV3) {
+      const parsed = JSON.parse(rawV3) as unknown
+      const doc = loadDocumentV3(parsed)
+      if (doc) applyDocumentV3(doc)
     } else {
-      const rawV1 = localStorage.getItem(STORAGE_KEY_V1)
-      if (rawV1) {
-        const data = JSON.parse(rawV1) as Partial<PersistedStateV1>
-        if (data.v === 1 && Array.isArray(data.items)) {
-          const next = data.items.filter(isValidCanvasItem)
-          const mig = migrateV1ToScene(next)
-          rootIds = mig.rootIds
-          nodes = mig.nodes
-          if (data.layerNames && typeof data.layerNames === 'object') {
-            layerNames = { ...data.layerNames }
+      const rawV2 = localStorage.getItem(STORAGE_KEY_V2)
+      if (rawV2) {
+        const data = JSON.parse(rawV2) as Partial<PersistedStateV2>
+        if (data.v === 2 && data.nodes && typeof data.nodes === 'object' && Array.isArray(data.rootIds)) {
+          const v2: PersistedStateV2 = {
+            v: 2,
+            rootIds: data.rootIds,
+            nodes: data.nodes as PersistedStateV2['nodes'],
+            layerNames: (data.layerNames as PersistedStateV2['layerNames']) ?? {},
+            definitions: (data.definitions as PersistedStateV2['definitions']) ?? {},
+            defaultFill: data.defaultFill ?? '#3b82f6',
+            defaultStroke: data.defaultStroke ?? '#1e3a5f',
+            defaultStrokeWidth: data.defaultStrokeWidth ?? 2,
+            symmetryGuidesOn: data.symmetryGuidesOn ?? true,
+            viewTx: data.viewTx,
+            viewTy: data.viewTy,
+            viewScale: data.viewScale,
           }
-          const ids = new Set(nodes.keys())
-          for (const k of Object.keys(layerNames)) {
-            if (!ids.has(k)) delete layerNames[k]
+          applyDocumentV3(migrateV2ToV3(v2))
+          persistToStorage()
+        }
+      } else {
+        const rawV1 = localStorage.getItem(STORAGE_KEY_V1)
+        if (rawV1) {
+          const data = JSON.parse(rawV1) as Partial<PersistedStateV1>
+          if (data.v === 1 && Array.isArray(data.items)) {
+            const next = data.items.filter(isValidCanvasItem)
+            const mig = migrateV1ToScene(next)
+            const v2: PersistedStateV2 = {
+              v: 2,
+              rootIds: mig.rootIds,
+              nodes: nodesToRecord(mig.nodes),
+              layerNames:
+                data.layerNames && typeof data.layerNames === 'object' ? { ...data.layerNames } : {},
+              definitions: {},
+              defaultFill: data.defaultFill ?? '#3b82f6',
+              defaultStroke: data.defaultStroke ?? '#1e3a5f',
+              defaultStrokeWidth: data.defaultStrokeWidth ?? 2,
+              symmetryGuidesOn: data.symmetryGuidesOn ?? true,
+              viewTx: data.viewTx,
+              viewTy: data.viewTy,
+              viewScale: data.viewScale,
+            }
+            applyDocumentV3(migrateV2ToV3(v2))
+            persistToStorage()
           }
-          applyLoadedView(data)
         }
       }
     }
@@ -1144,15 +1195,16 @@ export function mount(root: HTMLElement): void {
       l.setAttribute('y1', String(y1))
       l.setAttribute('x2', String(x2))
       l.setAttribute('y2', String(y2))
-      l.setAttribute('stroke', '#7c9cff')
+      l.setAttribute('stroke', '#c4b5fd')
       l.setAttribute('stroke-opacity', '0.35')
       l.setAttribute('stroke-width', '1')
       l.setAttribute('stroke-dasharray', '8 6')
       l.setAttribute('vector-effect', 'non-scaling-stroke')
       return l
     }
-    guidesBack.appendChild(mkLine(VIEW_W / 2, 0, VIEW_W / 2, VIEW_H))
-    guidesBack.appendChild(mkLine(0, VIEW_H / 2, VIEW_W, VIEW_H / 2))
+    const b = snapBoundsForFrame()
+    guidesBack.appendChild(mkLine(b.x + b.width / 2, b.y, b.x + b.width / 2, b.y + b.height))
+    guidesBack.appendChild(mkLine(b.x, b.y + b.height / 2, b.x + b.width, b.y + b.height / 2))
   }
 
   function renderSnapGuides(verticalX: number | null, horizontalY: number | null): void {
@@ -1162,7 +1214,7 @@ export function mount(root: HTMLElement): void {
       l.setAttribute('x1', String(verticalX))
       l.setAttribute('x2', String(verticalX))
       l.setAttribute('y1', '0')
-      l.setAttribute('y2', String(VIEW_H))
+      l.setAttribute('y2', String(worldH))
       l.setAttribute('stroke', '#c4d0ff')
       l.setAttribute('stroke-width', '1.5')
       l.setAttribute('vector-effect', 'non-scaling-stroke')
@@ -1171,7 +1223,7 @@ export function mount(root: HTMLElement): void {
     if (horizontalY !== null) {
       const l = document.createElementNS('http://www.w3.org/2000/svg', 'line')
       l.setAttribute('x1', '0')
-      l.setAttribute('x2', String(VIEW_W))
+      l.setAttribute('x2', String(worldW))
       l.setAttribute('y1', String(horizontalY))
       l.setAttribute('y2', String(horizontalY))
       l.setAttribute('stroke', '#c4d0ff')
@@ -1237,7 +1289,6 @@ export function mount(root: HTMLElement): void {
       fileInput.click()
       setTool('select')
     }
-    closeTbDropdown()
     renderHandles()
   }
 
@@ -1247,7 +1298,9 @@ export function mount(root: HTMLElement): void {
 
   function removeChildRef(parentId: string | null, childId: string): void {
     if (parentId === null) {
-      rootIds = rootIds.filter((id) => id !== childId)
+      const r = roots()
+      const j = r.indexOf(childId)
+      if (j >= 0) r.splice(j, 1)
     } else {
       const p = nodes.get(parentId)
       if (p?.type === 'group') {
@@ -1262,8 +1315,9 @@ export function mount(root: HTMLElement): void {
     removeChildRef(child.parentId, childId)
     child.parentId = parentId
     if (parentId === null) {
-      const i = clamp(index, 0, rootIds.length)
-      rootIds.splice(i, 0, childId)
+      const r = roots()
+      const i = clamp(index, 0, r.length)
+      r.splice(i, 0, childId)
     } else {
       const p = nodes.get(parentId)
       if (p?.type === 'group') {
@@ -1448,8 +1502,9 @@ export function mount(root: HTMLElement): void {
       c.y += gy
     }
     if (parentId === null) {
-      rootIds.splice(insertIdx, 1)
-      rootIds.splice(insertIdx, 0, ...kids)
+      const r = roots()
+      r.splice(insertIdx, 1)
+      r.splice(insertIdx, 0, ...kids)
     } else {
       const p = nodes.get(parentId)
       if (p?.type === 'group') {
@@ -1576,7 +1631,7 @@ export function mount(root: HTMLElement): void {
       width: wf.width,
       height: wf.height,
     })
-    insertChildRef(parentId, instId, insertIdx >= 0 ? insertIdx : rootIds.length)
+    insertChildRef(parentId, instId, insertIdx >= 0 ? insertIdx : roots().length)
     selected = new Set([instId])
     commit()
   }
@@ -1652,7 +1707,7 @@ export function mount(root: HTMLElement): void {
     } else {
       scaleSceneSubtree(newRoot, sx, sy)
     }
-    insertChildRef(parentId, newRoot, insertIdx >= 0 ? insertIdx : rootIds.length)
+    insertChildRef(parentId, newRoot, insertIdx >= 0 ? insertIdx : roots().length)
     selected = new Set([newRoot])
     commit()
   }
@@ -1660,20 +1715,21 @@ export function mount(root: HTMLElement): void {
   function insertComponentInstance(compId: string): void {
     const def = definitions.get(compId)
     if (!def) return
-    const w = Math.min(def.intrinsicW, VIEW_W * 0.5)
-    const h = Math.min(def.intrinsicH, VIEW_H * 0.5)
+    const fr = getActiveFrame()
+    const w = Math.min(def.intrinsicW, fr.width * 0.5)
+    const h = Math.min(def.intrinsicH, fr.height * 0.5)
     const nid = newId()
     nodes.set(nid, {
       id: nid,
       parentId: null,
       type: 'instance',
       componentId: compId,
-      x: (VIEW_W - w) / 2,
-      y: (VIEW_H - h) / 2,
+      x: fr.x + (fr.width - w) / 2,
+      y: fr.y + (fr.height - h) / 2,
       width: w,
       height: h,
     })
-    rootIds.push(nid)
+    roots().push(nid)
     selected = new Set([nid])
     commit()
   }
@@ -1775,9 +1831,12 @@ export function mount(root: HTMLElement): void {
   }
 
   function hitTestWorld(wx: number, wy: number): string | null {
-    for (let ri = rootIds.length - 1; ri >= 0; ri--) {
-      const h = hitNode(wx, wy, rootIds[ri]!, nodes)
-      if (h) return h
+    for (let fi = frames.length - 1; fi >= 0; fi--) {
+      const fr = frames[fi]!.rootIds
+      for (let ri = fr.length - 1; ri >= 0; ri--) {
+        const h = hitNode(wx, wy, fr[ri]!, nodes)
+        if (h) return h
+      }
     }
     return null
   }
@@ -1813,30 +1872,17 @@ export function mount(root: HTMLElement): void {
     btnInsertInst.disabled = definitions.size === 0 || selCompPick.value === ''
   }
 
-  function updateComponentBanner(): void {
-    if (editingComponentId) {
-      const d = definitions.get(editingComponentId)
-      compBanner.hidden = false
-      compBannerText.textContent = d
-        ? `Editing main component: ${d.name}`
-        : 'Editing component'
-    } else {
-      compBanner.hidden = true
-    }
-  }
-
   function enterComponentEdit(compId: string): void {
     const d = definitions.get(compId)
     if (!d) return
-    closeTbDropdown()
     closeColorPickerPanel()
     mainNodesBackup = new Map(nodes)
-    mainRootIdsBackup = [...rootIds]
+    mainRootIdsBackup = [...roots()]
     nodes = recordToNodes({ ...d.nodes } as Record<string, unknown>)
-    rootIds = [d.rootId]
+    componentEditRoots = [d.rootId]
     editingComponentId = compId
     selected.clear()
-    updateComponentBanner()
+    btnCompDone.hidden = false
     commit()
   }
 
@@ -1845,7 +1891,7 @@ export function mount(root: HTMLElement): void {
       editingComponentId = null
       mainNodesBackup = null
       mainRootIdsBackup = null
-      updateComponentBanner()
+      btnCompDone.hidden = true
       return
     }
     const compId = editingComponentId
@@ -1857,11 +1903,13 @@ export function mount(root: HTMLElement): void {
       }
     }
     nodes = mainNodesBackup
-    rootIds = mainRootIdsBackup
-    mainNodesBackup = null
+    const af = getActiveFrame()
+    af.rootIds.splice(0, af.rootIds.length, ...(mainRootIdsBackup ?? []))
     mainRootIdsBackup = null
+    componentEditRoots = null
+    mainNodesBackup = null
     editingComponentId = null
-    updateComponentBanner()
+    btnCompDone.hidden = true
     commit()
   }
 
@@ -1910,7 +1958,7 @@ export function mount(root: HTMLElement): void {
   let layerDropKind: 'before' | 'into' | null = null
 
   function siblingListForParent(parentId: string | null): string[] {
-    if (parentId === null) return rootIds
+    if (parentId === null) return roots()
     const p = nodes.get(parentId)
     return p?.type === 'group' ? p.childIds : []
   }
@@ -2268,8 +2316,10 @@ export function mount(root: HTMLElement): void {
 
   function renderItems(): void {
     itemsG.replaceChildren()
-    for (const rid of rootIds) {
-      renderSceneNode(rid, itemsG)
+    for (const frame of frames) {
+      for (const rid of frame.rootIds) {
+        renderSceneNode(rid, itemsG)
+      }
     }
     updateSelectionUi()
   }
@@ -2330,8 +2380,8 @@ export function mount(root: HTMLElement): void {
       hr.setAttribute('y', String(py - HANDLE_HALF))
       hr.setAttribute('width', String(HANDLE_HALF * 2))
       hr.setAttribute('height', String(HANDLE_HALF * 2))
-      hr.setAttribute('fill', '#1a1e28')
-      hr.setAttribute('stroke', '#7c9cff')
+      hr.setAttribute('fill', '#100c18')
+      hr.setAttribute('stroke', '#a78bfa')
       hr.setAttribute('stroke-width', '1')
       hr.setAttribute('data-pop-handle', hid)
       hr.setAttribute('data-item-id', id)
@@ -2351,14 +2401,88 @@ export function mount(root: HTMLElement): void {
     addHandle('w', x, y + h / 2)
   }
 
+  function syncTypographyPanel(): void {
+    const n = selected.size
+    const one = n === 1 ? getNode([...selected][0]!) : undefined
+    const isText = one?.type === 'text'
+    typographyProps.hidden = !isText
+    if (!isText || !one || one.type !== 'text') return
+    inpFontFamily.value = one.fontFamily
+    inpFontWeight.value = String(one.fontWeight)
+    inpLetterSpacing.value = String(one.letterSpacing)
+    inpLineHeight.value = String(one.lineHeight)
+  }
+
+  function syncGroupLayoutPanel(): void {
+    const n = selected.size
+    const one = n === 1 ? getNode([...selected][0]!) : undefined
+    const isGroup = one?.type === 'group'
+    groupLayoutProps.hidden = !isGroup
+    if (!isGroup || !one || one.type !== 'group') return
+    const layout = one.layout
+    if (!layout || layout.type === 'none') {
+      selGroupLayout.value = 'none'
+      inpGroupGap.value = '8'
+      inpGroupPad.value = '8'
+    } else if (layout.type === 'stack') {
+      selGroupLayout.value = layout.direction === 'horizontal' ? 'stack-h' : 'stack-v'
+      inpGroupGap.value = String(layout.gap)
+      inpGroupPad.value = String(layout.padding)
+    }
+  }
+
+  function updateCanvasDimensions(): void {
+    recomputeWorldSize()
+    svg.setAttribute('viewBox', `0 0 ${worldW} ${worldH}`)
+    svg.setAttribute('width', String(worldW))
+    svg.setAttribute('height', String(worldH))
+    canvasBgEl.setAttribute('width', String(worldW))
+    canvasBgEl.setAttribute('height', String(worldH))
+  }
+
+  function renderFrameOutlines(): void {
+    frameOutlinesG.replaceChildren()
+    for (const f of frames) {
+      const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
+      r.setAttribute('x', String(f.x))
+      r.setAttribute('y', String(f.y))
+      r.setAttribute('width', String(f.width))
+      r.setAttribute('height', String(f.height))
+      r.setAttribute('fill', 'none')
+      r.setAttribute('stroke', f.id === activeFrameId ? '#7c9cff' : 'rgba(124,156,255,0.35)')
+      r.setAttribute('stroke-width', '1')
+      r.setAttribute('stroke-dasharray', '6 4')
+      r.setAttribute('vector-effect', 'non-scaling-stroke')
+      frameOutlinesG.appendChild(r)
+    }
+  }
+
+  function syncFramePicker(): void {
+    const cur = popFramePick.value
+    popFramePick.replaceChildren()
+    for (const f of frames) {
+      const o = document.createElement('option')
+      o.value = f.id
+      o.textContent = f.label
+      popFramePick.appendChild(o)
+    }
+    if (frames.some((f) => f.id === cur)) popFramePick.value = cur
+    else popFramePick.value = activeFrameId
+  }
+
   function commit(): void {
     pruneLayerNames()
+    updateCanvasDimensions()
+    renderFrameOutlines()
+    syncFramePicker()
     renderItems()
     renderHandles()
     renderLayers()
     renderStaticGuides()
     if (!propsPanelFocused) syncPropsFromSelection()
     if (!stylePanelFocused) syncStyleFromSelection()
+    syncTypographyPanel()
+    syncGroupLayoutPanel()
     schedulePersist()
   }
 
@@ -2402,10 +2526,10 @@ export function mount(root: HTMLElement): void {
   updateZoomPctLabel()
 
   btnZoomIn.addEventListener('click', () => {
-    zoomAtWorldPoint(VIEW_W / 2, VIEW_H / 2, viewScale * 1.2)
+    zoomAtWorldPoint(worldW / 2, worldH / 2, viewScale * 1.2)
   })
   btnZoomOut.addEventListener('click', () => {
-    zoomAtWorldPoint(VIEW_W / 2, VIEW_H / 2, viewScale / 1.2)
+    zoomAtWorldPoint(worldW / 2, worldH / 2, viewScale / 1.2)
   })
   btnZoomReset.addEventListener('click', () => {
     viewTx = 0
@@ -2513,8 +2637,9 @@ export function mount(root: HTMLElement): void {
         return `  <g transform="translate(${o.x} ${o.y})">\n${inner}\n  </g>`
       })
       .join('\n')
+    const f = getActiveFrame()
     const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${VIEW_W}" height="${VIEW_H}" viewBox="0 0 ${VIEW_W} ${VIEW_H}">
+<svg xmlns="http://www.w3.org/2000/svg" width="${f.width}" height="${f.height}" viewBox="0 0 ${f.width} ${f.height}">
 ${parts}
 </svg>
 `
@@ -2522,7 +2647,11 @@ ${parts}
   })
 
   btnExportAll.addEventListener('click', () => {
-    downloadSvg(serializeSvgFromRoots(rootIds, nodes, definitions, VIEW_W, VIEW_H), 'pop-canvas.svg')
+    const f = getActiveFrame()
+    downloadSvg(
+      serializeSvgFromRoots(roots(), nodes, definitions, f.width, f.height),
+      `pop-frame-${f.label.replace(/\s+/g, '-')}.svg`,
+    )
   })
 
   tabLayersBtn.addEventListener('click', () => setLayersAsideTab('layers'))
@@ -2553,8 +2682,9 @@ ${parts}
         const scale = Math.min(1, max / w, max / h)
         w *= scale
         h *= scale
-        const x = (VIEW_W - w) / 2
-        const y = (VIEW_H - h) / 2
+        const fr = getActiveFrame()
+        const x = fr.x + (fr.width - w) / 2
+        const y = fr.y + (fr.height - h) / 2
         const nid = newId()
         nodes.set(nid, {
           id: nid,
@@ -2567,7 +2697,7 @@ ${parts}
           href,
           opacity: defaultOpacity,
         })
-        rootIds.push(nid)
+        roots().push(nid)
         selected = new Set([nid])
         setTool('select')
         commit()
@@ -2665,7 +2795,7 @@ ${parts}
         opacity: defaultOpacity,
       })
       clampRectCornerRadius(nodes.get(nid)!)
-      rootIds.push(nid)
+      roots().push(nid)
       selected = new Set([nid])
       setTool('select')
     } else if (tool === 'ellipse') {
@@ -2685,7 +2815,7 @@ ${parts}
         strokeWidth: defaultStrokeWidth,
         opacity: defaultOpacity,
       })
-      rootIds.push(nid)
+      roots().push(nid)
       selected = new Set([nid])
       setTool('select')
     } else if (tool === 'text') {
@@ -2705,8 +2835,12 @@ ${parts}
         fontSize,
         fill: defaultFill,
         opacity: defaultOpacity,
+        fontFamily: 'system-ui, sans-serif',
+        fontWeight: 400,
+        letterSpacing: 0,
+        lineHeight: 1.2,
       })
-      rootIds.push(nid)
+      roots().push(nid)
       selected = new Set([nid])
       setTool('select')
     }
@@ -2759,10 +2893,11 @@ ${parts}
     if (symmetryGuidesOn && selected.size > 0) {
       const u = unionBoundsWorld(selected, nodes, definitions)
       if (u) {
-        const tx = collectSnapTargetsX(selected, nodes, definitions)
-        const ty = collectSnapTargetsY(selected, nodes, definitions)
-        const sx = snapAxis('x', u.left, u.cx, u.right, tx, SNAP_PX)
-        const sy = snapAxis('y', u.top, u.cy, u.bottom, ty, SNAP_PX)
+        const sb = snapBoundsForFrame()
+        const tx = collectSnapTargetsX(selected, nodes, definitions, sb)
+        const ty = collectSnapTargetsY(selected, nodes, definitions, sb)
+        const sx = snapAxis('x', u.left, u.cx, u.right, tx, SNAP_PX, sb)
+        const sy = snapAxis('y', u.top, u.cy, u.bottom, ty, SNAP_PX, sb)
         if (sx.delta !== 0 || sy.delta !== 0) {
           for (const sid of selected) {
             const it = getNode(sid)
@@ -2868,6 +3003,133 @@ ${parts}
       commit()
     }
   })
+
+  popFramePick.addEventListener('change', () => {
+    const v = popFramePick.value
+    if (frames.some((x) => x.id === v)) {
+      activeFrameId = v
+      commit()
+    }
+  })
+
+  btnFrameAdd.addEventListener('click', () => {
+    const b = computeWorldBounds(frames, VIEW_W, VIEW_H)
+    const nf = createDefaultFrame()
+    nf.x = b.worldW + 32
+    nf.y = 0
+    nf.width = 390
+    nf.height = 844
+    nf.label = `Frame ${frames.length + 1}`
+    frames.push(nf)
+    activeFrameId = nf.id
+    commit()
+  })
+
+  btnDocOpen.addEventListener('click', () => {
+    docFileInput.click()
+  })
+
+  docFileInput.addEventListener('change', () => {
+    const file = docFileInput.files?.[0]
+    docFileInput.value = ''
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result)) as unknown
+        const doc = loadDocumentV3(parsed)
+        if (!doc) {
+          alert('Invalid Pop document JSON.')
+          return
+        }
+        applyDocumentV3(doc)
+        selected.clear()
+        commit()
+      } catch {
+        alert('Could not read document file.')
+      }
+    }
+    reader.readAsText(file)
+  })
+
+  btnDocSave.addEventListener('click', () => {
+    const json = documentToV3Json(buildDocumentV3())
+    const blob = new Blob([json], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${(docName || 'pop').replace(/[^\w.-]+/g, '-')}.pop.json`
+    a.rel = 'noopener'
+    a.click()
+    URL.revokeObjectURL(url)
+  })
+
+  btnExportHtml.addEventListener('click', () => {
+    const f = getActiveFrame()
+    const html = exportFrameToHtml(f, nodes, definitions, tokens, { title: docName })
+    downloadHtml(html, `${(f.label || 'frame').replace(/\s+/g, '-')}.html`)
+  })
+
+  btnExportHtmlAll.addEventListener('click', () => {
+    let delay = 0
+    for (const f of frames) {
+      const html = exportFrameToHtml(f, nodes, definitions, tokens, { title: `${docName} · ${f.label}` })
+      const name = `${(f.label || 'frame').replace(/\s+/g, '-')}.html`
+      window.setTimeout(() => downloadHtml(html, name), delay)
+      delay += 200
+    }
+  })
+
+  function applyTypographyFromInputs(): void {
+    const ff = inpFontFamily.value.trim() || 'system-ui, sans-serif'
+    const fw = clamp(Math.round(Number(inpFontWeight.value) || 400), 100, 900)
+    const ls = Number.isFinite(Number(inpLetterSpacing.value)) ? Number(inpLetterSpacing.value) : 0
+    const lh =
+      Number.isFinite(Number(inpLineHeight.value)) && Number(inpLineHeight.value) > 0
+        ? Number(inpLineHeight.value)
+        : 1.2
+    for (const id of selected) {
+      const it = getNode(id)
+      if (it?.type !== 'text') continue
+      it.fontFamily = ff
+      it.fontWeight = fw
+      it.letterSpacing = ls
+      it.lineHeight = lh
+    }
+    commit()
+  }
+
+  ;[inpFontFamily, inpFontWeight, inpLetterSpacing, inpLineHeight].forEach((el) => {
+    el.addEventListener('change', () => applyTypographyFromInputs())
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') applyTypographyFromInputs()
+    })
+  })
+
+  function applyGroupLayoutFromInputs(): void {
+    const id = [...selected][0]
+    const g = id ? getNode(id) : undefined
+    if (!g || g.type !== 'group') return
+    const mode = selGroupLayout.value
+    let layout: GroupLayout
+    if (mode === 'none') layout = { type: 'none' }
+    else {
+      const gap = Math.max(0, Math.round(Number(inpGroupGap.value) || 0))
+      const padding = Math.max(0, Math.round(Number(inpGroupPad.value) || 0))
+      layout = {
+        type: 'stack',
+        direction: mode === 'stack-h' ? 'horizontal' : 'vertical',
+        gap,
+        padding,
+      }
+    }
+    g.layout = layout
+    commit()
+  }
+
+  selGroupLayout.addEventListener('change', () => applyGroupLayoutFromInputs())
+  inpGroupGap.addEventListener('change', () => applyGroupLayoutFromInputs())
+  inpGroupPad.addEventListener('change', () => applyGroupLayoutFromInputs())
 
   setBaseSymHint()
   commit()

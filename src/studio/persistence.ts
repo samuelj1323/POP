@@ -1,6 +1,14 @@
 import { clamp } from './math.ts'
-import type { CanvasItem, ComponentDefinition, DefNode, SceneNode } from './scene-types.ts'
+import type {
+  CanvasItem,
+  ComponentDefinition,
+  DefNode,
+  GroupLayout,
+  SceneGroup,
+  SceneNode,
+} from './scene-types.ts'
 
+export const STORAGE_KEY_V3 = 'pop-studio-state-v3'
 export const STORAGE_KEY_V2 = 'pop-studio-state-v2'
 export const STORAGE_KEY_V1 = 'pop-studio-state-v1'
 
@@ -88,7 +96,42 @@ export function normalizeSceneNode(x: unknown): SceneNode | null {
       ) {
         return null
       }
-      return o as unknown as SceneNode
+      {
+        const base = { ...o } as Record<string, unknown>
+        const layoutRaw = base.layout
+        let layout: GroupLayout | undefined
+        if (layoutRaw && typeof layoutRaw === 'object') {
+          const L = layoutRaw as Record<string, unknown>
+          if (L.type === 'none') layout = { type: 'none' }
+          else if (
+            L.type === 'stack' &&
+            (L.direction === 'horizontal' || L.direction === 'vertical') &&
+            typeof L.gap === 'number' &&
+            typeof L.padding === 'number'
+          ) {
+            layout = {
+              type: 'stack',
+              direction: L.direction,
+              gap: L.gap,
+              padding: L.padding,
+            }
+          }
+        }
+        const exportRoleRaw = base.exportRole
+        const exportRole =
+          typeof exportRoleRaw === 'string' &&
+          ['auto', 'div', 'button', 'section', 'main', 'header', 'footer', 'nav', 'card'].includes(
+            exportRoleRaw,
+          )
+            ? (exportRoleRaw as SceneGroup['exportRole'])
+            : undefined
+        const g: SceneGroup = {
+          ...(base as unknown as SceneGroup),
+          ...(layout ? { layout } : {}),
+          ...(exportRole ? { exportRole } : {}),
+        }
+        return g as unknown as SceneNode
+      }
     case 'instance':
       if (!(n('x') && n('y') && n('width') && n('height') && s('componentId'))) return null
       return o as unknown as SceneNode
@@ -120,7 +163,28 @@ export function normalizeSceneNode(x: unknown): SceneNode | null {
       if (!(n('x') && n('y') && n('width') && n('height') && s('content') && n('fontSize') && s('fill'))) {
         return null
       }
-      return { ...o, opacity: readOpacity() } as unknown as SceneNode
+      {
+        const fontFamily =
+          s('fontFamily') && typeof o.fontFamily === 'string' ? o.fontFamily : 'system-ui, sans-serif'
+        const fontWeight =
+          n('fontWeight') && Number.isFinite(o.fontWeight as number)
+            ? Math.round(clamp(o.fontWeight as number, 100, 900))
+            : 400
+        const letterSpacing =
+          n('letterSpacing') && Number.isFinite(o.letterSpacing as number) ? (o.letterSpacing as number) : 0
+        const lineHeight =
+          n('lineHeight') && Number.isFinite(o.lineHeight as number) && (o.lineHeight as number) > 0
+            ? (o.lineHeight as number)
+            : 1.2
+        return {
+          ...o,
+          opacity: readOpacity(),
+          fontFamily,
+          fontWeight,
+          letterSpacing,
+          lineHeight,
+        } as unknown as SceneNode
+      }
     case 'image':
       if (!(n('x') && n('y') && n('width') && n('height') && s('href'))) return null
       return { ...o, opacity: readOpacity() } as unknown as SceneNode
@@ -172,6 +236,10 @@ export function migrateV1ToScene(items: CanvasItem[]): { rootIds: string[]; node
         fontSize: it.fontSize,
         fill: it.fill,
         opacity: 1,
+        fontFamily: 'system-ui, sans-serif',
+        fontWeight: 400,
+        letterSpacing: 0,
+        lineHeight: 1.2,
       })
     } else {
       nodeMap.set(it.id, {
