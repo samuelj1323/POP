@@ -67,7 +67,11 @@ body {
   color: var(--text);
 }
 
-.pop-toolbar {
+.pop-toolbar-wrap {
+  margin-bottom: 1rem;
+}
+
+.pop-toolbar-bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -76,7 +80,171 @@ body {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
-  margin-bottom: 1rem;
+}
+
+.pop-toolbar-pin {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.pop-toolbar-pin-glyph {
+  font-size: 1rem;
+  line-height: 1;
+  opacity: 0.9;
+}
+
+.pop-toolbar-expanded {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.5rem;
+  flex: 1;
+  min-width: min(100%, 12rem);
+}
+
+.pop-toolbar-hint {
+  margin: 0.45rem 0 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--muted);
+  max-width: 36rem;
+}
+
+.pop-toolbar-hint[hidden] {
+  display: none !important;
+}
+
+.pop-tb-dd {
+  position: relative;
+  display: inline-flex;
+}
+
+.pop-tb-dd-panel {
+  min-width: 14rem;
+  max-width: min(22rem, calc(100vw - 1.5rem));
+  padding: 0.65rem 0.7rem 0.6rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.pop-tb-dd-panel[hidden] {
+  display: none !important;
+}
+
+.pop-tb-dd-desc {
+  margin: 0 0 0.55rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.pop-tb-grid {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.pop-tb-grid-tools {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.pop-tb-grid-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.pop-tb-grid-view {
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.pop-tb-span2 {
+  grid-column: 1 / -1;
+}
+
+.pop-tb-grid-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  text-align: left;
+  min-height: 3.25rem;
+  justify-content: center;
+}
+
+.pop-tb-grid-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.2;
+}
+
+.pop-tb-grid-sub {
+  font-size: 0.72rem;
+  line-height: 1.25;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.pop-tb-zoom-readout {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.25rem;
+  padding: 0 0.35rem;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.pop-tb-style-panel .pop-tb-style-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.pop-tb-style-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.pop-tb-style-lbl {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.pop-tb-stroke-w input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.pop-tb-comp-insert {
+  margin-top: 0.75rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.pop-tb-comp-insert-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.pop-tb-comp-insert-row .pop-comp-pick {
+  flex: 1 1 8rem;
+  min-width: 0;
+  max-width: none;
 }
 
 .pop-label {
@@ -299,6 +467,101 @@ body {
   color: var(--muted);
 }
 
+.pop-layer-aside-head {
+  margin-bottom: 0.65rem;
+}
+
+.pop-layer-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.45rem;
+}
+
+.pop-layer-tab {
+  flex: 1;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.35rem 0.4rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.pop-layer-tab:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.pop-layer-tab-active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.pop-layer-aside-hint {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.pop-layer-tab-panel {
+  min-height: 0;
+}
+
+.pop-parent-panel-desc {
+  margin: 0 0 0.5rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.pop-parent-chain {
+  list-style: none;
+  margin: 0 0 0.65rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: min(280px, 40vh);
+  overflow: auto;
+}
+
+.pop-parent-crumb {
+  margin: 0;
+  padding: 0;
+}
+
+.pop-parent-crumb-btn {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.pop-parent-crumb-btn:hover {
+  border-color: var(--accent);
+}
+
+.pop-parent-crumb-selected .pop-parent-crumb-btn {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.pop-btn-block {
+  width: 100%;
+  justify-content: center;
+}
+
 .pop-props {
   margin-top: 1.1rem;
   padding-top: 1rem;
@@ -390,6 +653,8 @@ body {
 }
 
 .pop-comp-banner {
+  position: relative;
+  z-index: 2100;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -448,6 +713,13 @@ body {
   display: flex;
   align-items: center;
   gap: 0.35rem;
+  flex: 1;
+  min-width: 0;
+  cursor: grab;
+}
+
+.pop-layer-row:active {
+  cursor: grabbing;
 }
 
 .pop-layer-drag {
@@ -532,13 +804,10 @@ body {
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: auto;
-  /* Match SVG #pop-grid so margins around the artboard stay gridded when zoomed out. */
+  /* Solid fill only: the artboard grid lives in SVG (#pop-grid). A CSS grid here used
+     fixed 16px cells while the SVG pattern scales with display size, so two misaligned
+     grids appeared (different cell sizes and phase). */
   background-color: var(--canvas-cell);
-  background-image:
-    linear-gradient(var(--canvas-line) 0.5px, transparent 0.5px),
-    linear-gradient(90deg, var(--canvas-line) 0.5px, transparent 0.5px);
-  background-size: 16px 16px;
-  background-position: 0 0;
   padding: 0.75rem;
   display: flex;
   justify-content: center;

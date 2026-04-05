@@ -28,6 +28,8 @@ import {
   STORAGE_KEY_V1,
   STORAGE_KEY_V2,
 } from './studio/persistence.ts'
+
+const TOOLBAR_PIN_STORAGE_KEY = 'pop-toolbar-pinned'
 import type { PersistedStateV1, PersistedStateV2 } from './studio/persistence.ts'
 import type { ComponentDefinition, DefNode, SceneGroup, SceneNode, Tool } from './studio/scene-types.ts'
 import { collectSnapTargetsX, collectSnapTargetsY, snapAxis } from './studio/snap.ts'
@@ -51,6 +53,8 @@ export function mount(root: HTMLElement): void {
   /** Custom layer names by item id; when missing, UI falls back to `itemLabel`. */
   let layerNames: Record<string, string> = {}
   let selected = new Set<string>()
+  /** Left sidebar: layer tree vs parent-chain helper (Figma-style hierarchy). */
+  let layersAsideTab: 'layers' | 'parent' = 'layers'
   let tool: Tool = 'select'
   let defaultFill = '#3b82f6'
   let defaultStroke = '#1e3a5f'
@@ -98,70 +102,160 @@ export function mount(root: HTMLElement): void {
         <h1 class="pop-title">Pop</h1>
         <p class="pop-sub">Draw on the canvas, add images, then export SVG. Raster images become <code>&lt;image&gt;</code> in the SVG (embedded), not auto-traced vectors.</p>
       </header>
-      <div class="pop-toolbar">
-        <span class="pop-label">Tool</span>
-        <div class="pop-tools" role="group" aria-label="Tools">
-          <button type="button" class="pop-btn pop-tool" data-tool="select" aria-pressed="true">Select</button>
-          <button type="button" class="pop-btn pop-tool" data-tool="rect" aria-pressed="false">Rectangle</button>
-          <button type="button" class="pop-btn pop-tool" data-tool="ellipse" aria-pressed="false">Ellipse</button>
-          <button type="button" class="pop-btn pop-tool" data-tool="text" aria-pressed="false">Text</button>
-          <button type="button" class="pop-btn pop-tool" data-tool="image" aria-pressed="false">Image</button>
-        </div>
-        <span class="pop-sep"></span>
-        <span class="pop-label">Zoom</span>
-        <div class="pop-zoom" role="group" aria-label="Canvas zoom">
-          <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
-          <span class="pop-zoom-pct" id="pop-zoom-pct" aria-live="polite">100%</span>
-          <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
-          <button type="button" class="pop-btn" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset view</button>
-        </div>
-        <span class="pop-sep"></span>
-        <div class="pop-color-field">
-          <span class="pop-color-field-lbl">Fill</span>
-          <div class="pop-color-picker">
-            <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
-            <input type="color" class="pop-color-native" id="pop-fill" value="#3b82f6" tabindex="-1" />
-            <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
-              <div class="pop-color-panel-cap">Theme colors</div>
-              <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
-              <div class="pop-color-panel-cap">Standard colors</div>
-              <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
-              <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
+      <div class="pop-toolbar-wrap" id="pop-toolbar-wrap">
+        <div class="pop-toolbar-bar">
+          <button type="button" class="pop-btn pop-toolbar-pin" id="pop-toolbar-pin" aria-pressed="false" aria-expanded="false" aria-controls="pop-toolbar-expanded">
+            <span class="pop-toolbar-pin-glyph" aria-hidden="true">📌</span>
+            <span class="pop-toolbar-pin-label">Pin toolbar</span>
+          </button>
+          <div class="pop-toolbar-expanded" id="pop-toolbar-expanded" role="toolbar" aria-label="Studio tools" hidden>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-tools-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-tools-panel">Tools</button>
+              <div class="pop-tb-dd-panel" id="pop-tb-tools-panel" role="region" aria-labelledby="pop-tb-tools-btn" hidden>
+                <p class="pop-tb-dd-desc" id="pop-tb-tools-desc">Pick what you draw on the canvas next.</p>
+                <div class="pop-tb-grid pop-tb-grid-tools" role="group" aria-describedby="pop-tb-tools-desc">
+                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="select" aria-pressed="true">
+                    <span class="pop-tb-grid-title">Select</span>
+                    <span class="pop-tb-grid-sub">Move and resize</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="rect" aria-pressed="false">
+                    <span class="pop-tb-grid-title">Rectangle</span>
+                    <span class="pop-tb-grid-sub">Filled box</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="ellipse" aria-pressed="false">
+                    <span class="pop-tb-grid-title">Ellipse</span>
+                    <span class="pop-tb-grid-sub">Circle or oval</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="text" aria-pressed="false">
+                    <span class="pop-tb-grid-title">Text</span>
+                    <span class="pop-tb-grid-sub">Place a label</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="image" aria-pressed="false">
+                    <span class="pop-tb-grid-title">Image</span>
+                    <span class="pop-tb-grid-sub">Embed raster</span>
+                  </button>
+                </div>
+              </div>
             </div>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-view-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-view-panel">View</button>
+              <div class="pop-tb-dd-panel" id="pop-tb-view-panel" role="region" aria-labelledby="pop-tb-view-btn" hidden>
+                <p class="pop-tb-dd-desc">Zoom the canvas; reset returns to 100% and centered pan.</p>
+                <div class="pop-tb-grid pop-tb-grid-view" role="group" aria-label="Canvas zoom">
+                  <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
+                  <span class="pop-zoom-pct pop-tb-zoom-readout" id="pop-zoom-pct" aria-live="polite">100%</span>
+                  <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
+                  <button type="button" class="pop-btn pop-tb-span2" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset view</button>
+                </div>
+              </div>
+            </div>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-style-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-style-panel">Style</button>
+              <div class="pop-tb-dd-panel pop-tb-style-panel" id="pop-tb-style-panel" role="region" aria-labelledby="pop-tb-style-btn" hidden>
+                <p class="pop-tb-dd-desc">Defaults for new shapes; also updates selected rectangles, ellipses, and text.</p>
+                <div class="pop-tb-style-grid">
+                  <div class="pop-tb-style-block">
+                    <span class="pop-tb-style-lbl">Fill</span>
+                    <div class="pop-color-picker">
+                      <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
+                      <input type="color" class="pop-color-native" id="pop-fill" value="#3b82f6" tabindex="-1" />
+                      <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
+                        <div class="pop-color-panel-cap">Theme colors</div>
+                        <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
+                        <div class="pop-color-panel-cap">Standard colors</div>
+                        <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
+                        <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="pop-tb-style-block">
+                    <span class="pop-tb-style-lbl">Stroke</span>
+                    <div class="pop-color-picker">
+                      <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
+                      <input type="color" class="pop-color-native" id="pop-stroke" value="#1e3a5f" tabindex="-1" />
+                      <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
+                        <div class="pop-color-panel-cap">Theme colors</div>
+                        <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
+                        <div class="pop-color-panel-cap">Standard colors</div>
+                        <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
+                        <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
+                      </div>
+                    </div>
+                  </div>
+                  <label class="pop-tb-style-block pop-tb-stroke-w">
+                    <span class="pop-tb-style-lbl">Stroke width</span>
+                    <input type="range" id="pop-stroke-w" min="0" max="12" value="2" aria-label="Stroke width" />
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-export-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-export-panel">Export</button>
+              <div class="pop-tb-dd-panel" id="pop-tb-export-panel" role="region" aria-labelledby="pop-tb-export-btn" hidden>
+                <p class="pop-tb-dd-desc">Save SVG to your device.</p>
+                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Export">
+                  <button type="button" class="pop-btn pop-primary pop-tb-grid-btn" id="pop-export-sel">
+                    <span class="pop-tb-grid-title">Selection</span>
+                    <span class="pop-tb-grid-sub">SVG of picked layers</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-export-all">
+                    <span class="pop-tb-grid-title">Full canvas</span>
+                    <span class="pop-tb-grid-sub">Everything on the artboard</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-arrange-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-arrange-panel">Selection</button>
+              <div class="pop-tb-dd-panel" id="pop-tb-arrange-panel" role="region" aria-labelledby="pop-tb-arrange-btn" hidden>
+                <p class="pop-tb-dd-desc">Organize the layers you have selected in the list or on the canvas.</p>
+                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Selection actions">
+                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-group" disabled>
+                    <span class="pop-tb-grid-title">Group</span>
+                    <span class="pop-tb-grid-sub">Merge into one folder</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-ungroup" disabled>
+                    <span class="pop-tb-grid-title">Ungroup</span>
+                    <span class="pop-tb-grid-sub">Split one group</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-danger pop-tb-grid-btn pop-tb-span2" id="pop-delete" disabled>
+                    <span class="pop-tb-grid-title">Delete</span>
+                    <span class="pop-tb-grid-sub">Remove selected layers</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="pop-tb-dd" data-pop-tb-dd>
+              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-comp-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-comp-panel">Components</button>
+              <div class="pop-tb-dd-panel pop-tb-comp-panel" id="pop-tb-comp-panel" role="region" aria-labelledby="pop-tb-comp-btn" hidden>
+                <p class="pop-tb-dd-desc">Reusable symbols and instances.</p>
+                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Component actions">
+                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-create-comp" disabled>
+                    <span class="pop-tb-grid-title">Create component</span>
+                    <span class="pop-tb-grid-sub">From selection</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-detach" disabled>
+                    <span class="pop-tb-grid-title">Detach instance</span>
+                    <span class="pop-tb-grid-sub">Edit as raw layers</span>
+                  </button>
+                  <button type="button" class="pop-btn pop-tb-grid-btn pop-tb-span2" id="pop-edit-comp" disabled>
+                    <span class="pop-tb-grid-title">Edit main</span>
+                    <span class="pop-tb-grid-sub">Open component definition</span>
+                  </button>
+                </div>
+                <div class="pop-tb-comp-insert">
+                  <span class="pop-tb-style-lbl">Insert instance</span>
+                  <div class="pop-tb-comp-insert-row">
+                    <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
+                    <button type="button" class="pop-btn" id="pop-insert-inst">Place</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <input type="file" id="pop-file" accept="image/*" hidden />
           </div>
         </div>
-        <div class="pop-color-field">
-          <span class="pop-color-field-lbl">Stroke</span>
-          <div class="pop-color-picker">
-            <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
-            <input type="color" class="pop-color-native" id="pop-stroke" value="#1e3a5f" tabindex="-1" />
-            <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
-              <div class="pop-color-panel-cap">Theme colors</div>
-              <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
-              <div class="pop-color-panel-cap">Standard colors</div>
-              <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
-              <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
-            </div>
-          </div>
-        </div>
-        <label class="pop-stroke-w">Width <input type="range" id="pop-stroke-w" min="0" max="12" value="2"/></label>
-        <span class="pop-sep"></span>
-        <button type="button" class="pop-btn pop-primary" id="pop-export-sel">Download selected as SVG</button>
-        <button type="button" class="pop-btn" id="pop-export-all">Download full canvas</button>
-        <button type="button" class="pop-btn pop-danger" id="pop-delete" disabled>Delete</button>
-        <span class="pop-sep"></span>
-        <button type="button" class="pop-btn" id="pop-group" disabled>Group</button>
-        <button type="button" class="pop-btn" id="pop-ungroup" disabled>Ungroup</button>
-        <span class="pop-sep"></span>
-        <button type="button" class="pop-btn" id="pop-create-comp" disabled>Create component</button>
-        <button type="button" class="pop-btn" id="pop-detach" disabled>Detach instance</button>
-        <button type="button" class="pop-btn" id="pop-edit-comp" disabled>Edit main</button>
-        <label class="pop-comp-insert">
-          <span class="pop-label">Insert</span>
-          <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
-          <button type="button" class="pop-btn" id="pop-insert-inst">Instance</button>
-        </label>
-        <input type="file" id="pop-file" accept="image/*" hidden />
+        <p class="pop-toolbar-hint" id="pop-toolbar-hint">Toolbar is hidden. Pin it to use tools, zoom, colors, and export.</p>
       </div>
       <div class="pop-comp-banner" id="pop-comp-banner" hidden>
         <span id="pop-comp-banner-text"></span>
@@ -169,8 +263,21 @@ export function mount(root: HTMLElement): void {
       </div>
       <div class="pop-main">
         <aside class="pop-layers" aria-label="Layers and transform">
-          <h2>Layers</h2>
-          <ul class="pop-layer-list" id="pop-layers" data-pop-layer-tree></ul>
+          <div class="pop-layer-aside-head">
+            <div class="pop-layer-tabs" role="tablist" aria-label="Layer panel">
+              <button type="button" class="pop-layer-tab pop-layer-tab-active" role="tab" id="pop-tab-layers" aria-selected="true" aria-controls="pop-layers-tree-panel">Layers</button>
+              <button type="button" class="pop-layer-tab" role="tab" id="pop-tab-parent" aria-selected="false" aria-controls="pop-layers-parent-panel">Parent</button>
+            </div>
+            <p class="pop-layer-aside-hint">Drag a row to reorder or nest (lower half nests). ⌘ or Ctrl+click to multi-select.</p>
+          </div>
+          <div id="pop-layers-tree-panel" class="pop-layer-tab-panel" role="tabpanel" aria-labelledby="pop-tab-layers">
+            <ul class="pop-layer-list" id="pop-layers" data-pop-layer-tree></ul>
+          </div>
+          <div id="pop-layers-parent-panel" class="pop-layer-tab-panel" hidden role="tabpanel" aria-labelledby="pop-tab-parent">
+            <p class="pop-parent-panel-desc" id="pop-parent-panel-desc">Select a layer to see its parent chain.</p>
+            <ol class="pop-parent-chain" id="pop-parent-chain" aria-label="Parent chain from root to selection"></ol>
+            <button type="button" class="pop-btn pop-btn-block" id="pop-select-siblings" disabled>Select all siblings</button>
+          </div>
           <div class="pop-props">
             <h2>Transform</h2>
             <div class="pop-prop-grid" id="pop-prop-grid">
@@ -213,6 +320,13 @@ export function mount(root: HTMLElement): void {
   const itemsG = root.querySelector<SVGGElement>('#pop-items')!
   const handlesG = root.querySelector<SVGGElement>('#pop-handles')!
   const layerList = root.querySelector<HTMLUListElement>('#pop-layers')!
+  const tabLayersBtn = root.querySelector<HTMLButtonElement>('#pop-tab-layers')!
+  const tabParentBtn = root.querySelector<HTMLButtonElement>('#pop-tab-parent')!
+  const layersTreePanel = root.querySelector<HTMLElement>('#pop-layers-tree-panel')!
+  const layersParentPanel = root.querySelector<HTMLElement>('#pop-layers-parent-panel')!
+  const parentPanelDesc = root.querySelector<HTMLParagraphElement>('#pop-parent-panel-desc')!
+  const parentChainEl = root.querySelector<HTMLOListElement>('#pop-parent-chain')!
+  const btnSelectSiblings = root.querySelector<HTMLButtonElement>('#pop-select-siblings')!
   const fileInput = root.querySelector<HTMLInputElement>('#pop-file')!
   const fillInput = root.querySelector<HTMLInputElement>('#pop-fill')!
   const strokeInput = root.querySelector<HTMLInputElement>('#pop-stroke')!
@@ -258,6 +372,22 @@ export function mount(root: HTMLElement): void {
   const btnZoomOut = root.querySelector<HTMLButtonElement>('#pop-zoom-out')!
   const btnZoomReset = root.querySelector<HTMLButtonElement>('#pop-zoom-reset')!
   const elZoomPct = root.querySelector<HTMLElement>('#pop-zoom-pct')!
+  const toolbarWrap = root.querySelector<HTMLElement>('#pop-toolbar-wrap')!
+  const btnToolbarPin = root.querySelector<HTMLButtonElement>('#pop-toolbar-pin')!
+  const toolbarExpanded = root.querySelector<HTMLElement>('#pop-toolbar-expanded')!
+  const toolbarHint = root.querySelector<HTMLElement>('#pop-toolbar-hint')!
+  const pinLabelEl = btnToolbarPin.querySelector<HTMLElement>('.pop-toolbar-pin-label')!
+
+  /** Pinned unless user chose to hide (`'0'` in storage). */
+  let toolbarPinned = localStorage.getItem(TOOLBAR_PIN_STORAGE_KEY) !== '0'
+  let openTbDropdown: { panel: HTMLElement; trigger: HTMLButtonElement } | null = null
+
+  function closeTbDropdown(): void {
+    if (!openTbDropdown) return
+    openTbDropdown.panel.hidden = true
+    openTbDropdown.trigger.setAttribute('aria-expanded', 'false')
+    openTbDropdown = null
+  }
 
   function updateFillSwatch(): void {
     fillSwatch.style.backgroundColor = fillInput.value
@@ -283,6 +413,20 @@ export function mount(root: HTMLElement): void {
     openColorPicker = null
   }
 
+  function panelRectIntersectsBanner(
+    left: number,
+    top: number,
+    pw: number,
+    ph: number,
+  ): boolean {
+    if (compBanner.hidden) return false
+    const br = compBanner.getBoundingClientRect()
+    if (br.width === 0 || br.height === 0) return false
+    const prRight = left + pw
+    const prBottom = top + ph
+    return !(prRight <= br.left || left >= br.right || prBottom <= br.top || top >= br.bottom)
+  }
+
   function positionColorPanel(panel: HTMLElement, swatch: HTMLButtonElement): void {
     panel.style.position = 'fixed'
     panel.style.zIndex = '2000'
@@ -299,8 +443,80 @@ export function mount(root: HTMLElement): void {
     if (top + ph > window.innerHeight - margin) {
       top = Math.max(margin, r.top - ph - margin)
     }
+
+    if (panelRectIntersectsBanner(left, top, pw, ph)) {
+      const above = r.top - ph - margin
+      if (above >= margin && !panelRectIntersectsBanner(left, above, pw, ph)) {
+        top = above
+      } else {
+        const br = compBanner.getBoundingClientRect()
+        const belowBanner = br.bottom + margin
+        if (belowBanner + ph <= window.innerHeight - margin) {
+          top = belowBanner
+        } else if (above >= margin) {
+          top = above
+        }
+      }
+    }
+
     panel.style.left = `${left}px`
     panel.style.top = `${top}px`
+  }
+
+  function positionTbDropdown(panel: HTMLElement, trigger: HTMLElement): void {
+    panel.style.position = 'fixed'
+    panel.style.zIndex = '1999'
+    const r = trigger.getBoundingClientRect()
+    const margin = 8
+    const pw = panel.offsetWidth
+    const ph = panel.offsetHeight
+    let left = r.left
+    let top = r.bottom + margin
+    if (left + pw > window.innerWidth - margin) {
+      left = Math.max(margin, window.innerWidth - pw - margin)
+    }
+    if (left < margin) left = margin
+    if (top + ph > window.innerHeight - margin) {
+      top = Math.max(margin, r.top - ph - margin)
+    }
+
+    if (panelRectIntersectsBanner(left, top, pw, ph)) {
+      const above = r.top - ph - margin
+      if (above >= margin && !panelRectIntersectsBanner(left, above, pw, ph)) {
+        top = above
+      } else {
+        const br = compBanner.getBoundingClientRect()
+        const belowBanner = br.bottom + margin
+        if (belowBanner + ph <= window.innerHeight - margin) {
+          top = belowBanner
+        } else if (above >= margin) {
+          top = above
+        }
+      }
+    }
+
+    panel.style.left = `${left}px`
+    panel.style.top = `${top}px`
+  }
+
+  function openTbDropdownPanel(panel: HTMLElement, trigger: HTMLButtonElement): void {
+    closeColorPickerPanel()
+    closeTbDropdown()
+    panel.hidden = false
+    trigger.setAttribute('aria-expanded', 'true')
+    openTbDropdown = { panel, trigger }
+    requestAnimationFrame(() => {
+      positionTbDropdown(panel, trigger)
+      requestAnimationFrame(() => positionTbDropdown(panel, trigger))
+    })
+  }
+
+  function toggleTbDropdownPanel(panel: HTMLElement, trigger: HTMLButtonElement): void {
+    if (openTbDropdown?.panel === panel) {
+      closeTbDropdown()
+      return
+    }
+    openTbDropdownPanel(panel, trigger)
   }
 
   function toggleColorPickerPanel(panel: HTMLElement, swatch: HTMLButtonElement): void {
@@ -308,6 +524,7 @@ export function mount(root: HTMLElement): void {
       closeColorPickerPanel()
       return
     }
+    closeTbDropdown()
     closeColorPickerPanel()
     panel.hidden = false
     swatch.setAttribute('aria-expanded', 'true')
@@ -372,8 +589,13 @@ export function mount(root: HTMLElement): void {
   document.addEventListener(
     'pointerdown',
     (ev) => {
-      if (!openColorPicker) return
       const t = ev.target as Node
+      if (openTbDropdown) {
+        if (!openTbDropdown.panel.contains(t) && !openTbDropdown.trigger.contains(t)) {
+          closeTbDropdown()
+        }
+      }
+      if (!openColorPicker) return
       if (openColorPicker.panel.contains(t) || openColorPicker.swatch.contains(t)) return
       closeColorPickerPanel()
     },
@@ -381,15 +603,75 @@ export function mount(root: HTMLElement): void {
   )
 
   document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape') closeColorPickerPanel()
+    if (ev.key === 'Escape') {
+      closeTbDropdown()
+      closeColorPickerPanel()
+    }
   })
 
-  window.addEventListener('resize', () => closeColorPickerPanel())
+  window.addEventListener('resize', () => {
+    closeTbDropdown()
+    closeColorPickerPanel()
+  })
   window.addEventListener(
     'scroll',
-    () => closeColorPickerPanel(),
+    () => {
+      closeTbDropdown()
+      closeColorPickerPanel()
+    },
     true,
   )
+
+  function applyToolbarPinState(): void {
+    toolbarExpanded.hidden = !toolbarPinned
+    toolbarHint.hidden = toolbarPinned
+    btnToolbarPin.setAttribute('aria-pressed', String(toolbarPinned))
+    btnToolbarPin.setAttribute('aria-expanded', String(toolbarPinned))
+    toolbarWrap.classList.toggle('pop-toolbar-pinned', toolbarPinned)
+    pinLabelEl.textContent = toolbarPinned ? 'Unpin toolbar' : 'Pin toolbar'
+    if (!toolbarPinned) {
+      closeTbDropdown()
+      closeColorPickerPanel()
+    }
+  }
+
+  btnToolbarPin.addEventListener('click', () => {
+    toolbarPinned = !toolbarPinned
+    localStorage.setItem(TOOLBAR_PIN_STORAGE_KEY, toolbarPinned ? '1' : '0')
+    applyToolbarPinState()
+  })
+
+  root.querySelectorAll<HTMLElement>('[data-pop-tb-dd]').forEach((wrap) => {
+    const trigger = wrap.querySelector<HTMLButtonElement>('.pop-tb-dd-trigger')
+    const panel = wrap.querySelector<HTMLElement>('.pop-tb-dd-panel')
+    if (!trigger || !panel) return
+    trigger.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (!toolbarPinned) return
+      toggleTbDropdownPanel(panel, trigger)
+    })
+  })
+
+  toolbarExpanded.addEventListener(
+    'click',
+    (e) => {
+      if (!openTbDropdown) return
+      const hit = e.target as HTMLElement
+      if (hit.closest('.pop-tb-dd-trigger')) return
+      if (hit.closest('.pop-color-panel')) return
+      if (hit.closest('.pop-color-swatch')) return
+      if (hit.closest('input[type="range"]')) return
+      if (hit.closest('select')) return
+      if (!openTbDropdown.panel.contains(hit)) return
+      if (hit.closest('button')) {
+        queueMicrotask(() => closeTbDropdown())
+      }
+    },
+    true,
+  )
+
+  applyToolbarPinState()
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -819,6 +1101,7 @@ export function mount(root: HTMLElement): void {
       fileInput.click()
       setTool('select')
     }
+    closeTbDropdown()
     renderHandles()
   }
 
@@ -854,6 +1137,46 @@ export function mount(root: HTMLElement): void {
         p.childIds = next
       }
     }
+  }
+
+  function additiveMultiSelect(ev: MouseEvent | PointerEvent): boolean {
+    return ev.shiftKey || ev.metaKey || ev.ctrlKey
+  }
+
+  /** Depth from root (1 = canvas root). Used to pick a primary node when several are selected. */
+  function depthFromRoot(id: string): number {
+    let d = 0
+    let c: string | null = id
+    while (c) {
+      d++
+      c = nodes.get(c)?.parentId ?? null
+    }
+    return d
+  }
+
+  function primarySelectionId(): string | null {
+    if (selected.size === 0) return null
+    if (selected.size === 1) return [...selected][0]!
+    let best: string | null = null
+    let bestDepth = -1
+    for (const id of selected) {
+      const d = depthFromRoot(id)
+      if (d > bestDepth) {
+        bestDepth = d
+        best = id
+      }
+    }
+    return best
+  }
+
+  function ancestorChainOrdered(id: string): string[] {
+    const chain: string[] = []
+    let c: string | null = id
+    while (c) {
+      chain.push(c)
+      c = nodes.get(c)?.parentId ?? null
+    }
+    return chain.reverse()
   }
 
   function selectedDeletionRoots(): string[] {
@@ -1316,6 +1639,8 @@ export function mount(root: HTMLElement): void {
   function enterComponentEdit(compId: string): void {
     const d = definitions.get(compId)
     if (!d) return
+    closeTbDropdown()
+    closeColorPickerPanel()
     mainNodesBackup = new Map(nodes)
     mainRootIdsBackup = [...rootIds]
     nodes = recordToNodes({ ...d.nodes } as Record<string, SceneNode>)
@@ -1376,8 +1701,12 @@ export function mount(root: HTMLElement): void {
     itemsG.querySelectorAll<SVGGElement>('.pop-item').forEach((g) => {
       const id = g.dataset.id
       if (!id) return
-      g.classList.toggle('pop-item-selected', selected.has(id))
+      const canvasHighlight =
+        selected.size > 0 &&
+        [...selected].some((s) => isDescendant(nodes, s, id))
+      g.classList.toggle('pop-item-selected', canvasHighlight)
     })
+    if (layersAsideTab === 'parent') renderParentPanel()
   }
 
   function pruneLayerNames(): void {
@@ -1397,6 +1726,50 @@ export function mount(root: HTMLElement): void {
     return p?.type === 'group' ? p.childIds : []
   }
 
+  /** Wrap a single leaf in a new group at the same place in the tree (for nest-into). */
+  function wrapLeafAsNewGroup(leafId: string): string | null {
+    const t = nodes.get(leafId)
+    if (!t || t.type === 'instance' || t.type === 'group') return null
+    const parentId = t.parentId
+    const list = [...siblingListForParent(parentId)]
+    const idx = list.indexOf(leafId)
+    if (idx < 0) return null
+    removeChildRef(parentId, leafId)
+    const gid = newId()
+    const g: SceneGroup = {
+      id: gid,
+      parentId,
+      type: 'group',
+      x: t.x,
+      y: t.y,
+      width: t.width,
+      height: t.height,
+      childIds: [leafId],
+    }
+    nodes.set(gid, g)
+    t.parentId = gid
+    t.x = 0
+    t.y = 0
+    insertChildRef(parentId, gid, idx)
+    return gid
+  }
+
+  /**
+   * Target for "drop into": existing group, or parent group if target is the only child (avoid nested wrappers),
+   * or a new wrapper group around a leaf.
+   */
+  function resolveNestContainerId(targetId: string): string | null {
+    const t = nodes.get(targetId)
+    if (!t || t.type === 'instance') return null
+    if (t.type === 'group') return targetId
+    const p = t.parentId
+    const pn = p ? nodes.get(p) : undefined
+    if (pn?.type === 'group' && pn.childIds.length === 1 && pn.childIds[0] === targetId) {
+      return p!
+    }
+    return wrapLeafAsNewGroup(targetId)
+  }
+
   function moveLayerNode(
     dragId: string,
     targetId: string,
@@ -1405,15 +1778,25 @@ export function mount(root: HTMLElement): void {
     if (dragId === targetId) return
     const d = nodes.get(dragId)
     if (!d) return
+
     if (kind === 'into') {
       if (isDescendant(nodes, dragId, targetId)) return
-      const g = nodes.get(targetId)
+      const containerId = resolveNestContainerId(targetId)
+      if (!containerId) return
+      if (isDescendant(nodes, dragId, containerId)) return
+      const g = nodes.get(containerId)
       if (g?.type !== 'group') return
-      removeChildRef(d.parentId, dragId)
-      d.parentId = targetId
-      g.childIds.push(dragId)
+      const wf = worldFrame(nodes, definitions, dragId)
+      if (!wf) return
+      const insertAt = g.childIds.length
+      insertChildRef(containerId, dragId, insertAt)
+      const pwf = worldFrame(nodes, definitions, containerId)
+      if (!pwf) return
+      d.x = wf.x - pwf.x
+      d.y = wf.y - pwf.y
       return
     }
+
     if (isDescendant(nodes, dragId, targetId)) return
     const t = nodes.get(targetId)
     if (!t) return
@@ -1421,11 +1804,22 @@ export function mount(root: HTMLElement): void {
     const listBefore = [...siblingListForParent(parentId)]
     const ti = listBefore.indexOf(targetId)
     if (ti < 0) return
+    const wf = worldFrame(nodes, definitions, dragId)
+    if (!wf) return
     removeChildRef(d.parentId, dragId)
     const listAfter = siblingListForParent(parentId)
     const insertAt = listAfter.indexOf(targetId)
     if (insertAt < 0) return
     insertChildRef(parentId, dragId, insertAt)
+    if (parentId === null) {
+      d.x = wf.x
+      d.y = wf.y
+    } else {
+      const pwf = worldFrame(nodes, definitions, parentId)
+      if (!pwf) return
+      d.x = wf.x - pwf.x
+      d.y = wf.y - pwf.y
+    }
   }
 
   function renderLayerBranch(host: HTMLUListElement, parentId: string | null, depth: number): void {
@@ -1445,16 +1839,22 @@ export function mount(root: HTMLElement): void {
 
       const dragEl = document.createElement('span')
       dragEl.className = 'pop-layer-drag'
-      dragEl.draggable = true
+      dragEl.draggable = false
       dragEl.setAttribute('aria-hidden', 'true')
       dragEl.textContent = '⠿'
-      dragEl.addEventListener('dragstart', (e) => {
+
+      row.draggable = true
+      row.addEventListener('dragstart', (e) => {
+        if ((e.target as HTMLElement).closest('.pop-layer-name')) {
+          e.preventDefault()
+          return
+        }
         layerDragId = id
         e.dataTransfer?.setData('text/plain', id)
         e.dataTransfer!.effectAllowed = 'move'
         li.classList.add('pop-layer-dragging')
       })
-      dragEl.addEventListener('dragend', () => {
+      row.addEventListener('dragend', () => {
         layerDragId = null
         layerDropTargetId = null
         layerDropKind = null
@@ -1506,11 +1906,16 @@ export function mount(root: HTMLElement): void {
         e.preventDefault()
         e.dataTransfer!.dropEffect = 'move'
         const rect = li.getBoundingClientRect()
-        const into = item.type === 'group' && e.clientY > rect.top + rect.height * 0.35
+        const intoZone =
+          item.type === 'instance'
+            ? false
+            : item.type === 'group'
+              ? e.clientY > rect.top + rect.height * 0.33
+              : e.clientY > rect.top + rect.height * 0.5
         layerList.querySelectorAll('.pop-layer-drop-before, .pop-layer-drop-into').forEach((el) => {
           el.classList.remove('pop-layer-drop-before', 'pop-layer-drop-into')
         })
-        if (into) {
+        if (intoZone) {
           li.classList.add('pop-layer-drop-into')
           layerDropKind = 'into'
         } else {
@@ -1544,8 +1949,7 @@ export function mount(root: HTMLElement): void {
 
       li.addEventListener('click', (e) => {
         if ((e.target as Element).closest('.pop-layer-name')) return
-        if ((e.target as Element).closest('.pop-layer-drag')) return
-        if (e.shiftKey) {
+        if (additiveMultiSelect(e)) {
           if (selected.has(id)) selected.delete(id)
           else selected.add(id)
         } else {
@@ -1877,7 +2281,9 @@ export function mount(root: HTMLElement): void {
 
   btnExportSel.addEventListener('click', () => {
     if (selected.size === 0) {
-      alert('Select one or more layers first (click on the canvas or list, Shift for multi-select).')
+      alert(
+        'Select one or more layers first (canvas or list; ⌘/Ctrl+click or Shift+click for multi-select).',
+      )
       return
     }
     const tops = [...selected].filter(
@@ -1900,6 +2306,18 @@ ${parts}
 
   btnExportAll.addEventListener('click', () => {
     downloadSvg(serializeSvgFromRoots(rootIds, nodes, definitions, VIEW_W, VIEW_H), 'pop-canvas.svg')
+  })
+
+  tabLayersBtn.addEventListener('click', () => setLayersAsideTab('layers'))
+  tabParentBtn.addEventListener('click', () => setLayersAsideTab('parent'))
+  btnSelectSiblings.addEventListener('click', () => {
+    const prim = primarySelectionId()
+    if (!prim) return
+    const p = nodes.get(prim)?.parentId ?? null
+    selected = new Set(siblingListForParent(p))
+    updateSelectionUi()
+    syncPropsFromSelection()
+    renderHandles()
   })
 
   fileInput.addEventListener('change', () => {
@@ -1974,7 +2392,7 @@ ${parts}
 
     if (tool === 'select') {
       if (id) {
-        if (ev.shiftKey) {
+        if (additiveMultiSelect(ev)) {
           if (selected.has(id)) selected.delete(id)
           else selected.add(id)
         } else if (!selected.has(id)) {
@@ -1995,7 +2413,7 @@ ${parts}
         }
         svg.setPointerCapture(ev.pointerId)
       } else {
-        if (!ev.shiftKey) selected.clear()
+        if (!additiveMultiSelect(ev)) selected.clear()
         updateSelectionUi()
         syncPropsFromSelection()
         renderHandles()
