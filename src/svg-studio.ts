@@ -4,6 +4,80 @@ const SNAP_PX = 8
 
 type Tool = 'select' | 'rect' | 'ellipse' | 'text' | 'image'
 
+type SceneNodeBase = { id: string; parentId: string | null }
+
+type SceneLeaf =
+  | (SceneNodeBase & {
+      type: 'rect'
+      x: number
+      y: number
+      width: number
+      height: number
+      fill: string
+      stroke: string
+      strokeWidth: number
+    })
+  | (SceneNodeBase & {
+      type: 'ellipse'
+      x: number
+      y: number
+      width: number
+      height: number
+      fill: string
+      stroke: string
+      strokeWidth: number
+    })
+  | (SceneNodeBase & {
+      type: 'text'
+      x: number
+      y: number
+      width: number
+      height: number
+      content: string
+      fontSize: number
+      fill: string
+    })
+  | (SceneNodeBase & {
+      type: 'image'
+      x: number
+      y: number
+      width: number
+      height: number
+      href: string
+    })
+
+type SceneGroup = SceneNodeBase & {
+  type: 'group'
+  x: number
+  y: number
+  width: number
+  height: number
+  childIds: string[]
+}
+
+type SceneInstance = SceneNodeBase & {
+  type: 'instance'
+  componentId: string
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+type SceneNode = SceneLeaf | SceneGroup | SceneInstance
+
+type DefNode = Exclude<SceneNode, { type: 'instance' }>
+
+type ComponentDefinition = {
+  id: string
+  name: string
+  rootId: string
+  intrinsicW: number
+  intrinsicH: number
+  nodes: Record<string, DefNode>
+}
+
+/** Legacy flat canvas item (persist v1 only). */
 type CanvasItem =
   | {
       id: string
@@ -210,21 +284,69 @@ const HANDLE_CURSORS: Record<ResizeHandleId, string> = {
   w: 'ew-resize',
 }
 
-function unionBounds(
+function worldFrame(
+  nodes: Map<string, SceneNode>,
+  definitions: Map<string, ComponentDefinition>,
+  id: string,
+): { x: number; y: number; width: number; height: number } | null {
+  const n = nodes.get(id)
+  if (!n) return null
+  let ox = 0
+  let oy = 0
+  let cur: string | null = id
+  const chain: SceneNode[] = []
+  while (cur) {
+    const node = nodes.get(cur)
+    if (!node) break
+    chain.unshift(node)
+    cur = node.parentId
+  }
+  for (const node of chain) {
+    ox += node.x
+    oy += node.y
+  }
+  return { x: ox, y: oy, width: n.width, height: n.height }
+}
+
+function collectSubtreeIds(nodes: Map<string, SceneNode>, rootId: string): Set<string> {
+  const out = new Set<string>()
+  const walk = (id: string): void => {
+    if (out.has(id)) return
+    out.add(id)
+    const n = nodes.get(id)
+    if (n?.type === 'group') {
+      for (const c of n.childIds) walk(c)
+    }
+  }
+  walk(rootId)
+  return out
+}
+
+function isDescendant(nodes: Map<string, SceneNode>, ancestorId: string, nodeId: string): boolean {
+  let cur: string | null = nodeId
+  while (cur) {
+    if (cur === ancestorId) return true
+    cur = nodes.get(cur)?.parentId ?? null
+  }
+  return false
+}
+
+function unionBoundsWorld(
   ids: Iterable<string>,
-  get: (id: string) => CanvasItem | undefined,
+  nodes: Map<string, SceneNode>,
+  definitions: Map<string, ComponentDefinition>,
 ): { left: number; right: number; top: number; bottom: number; cx: number; cy: number } | null {
   let left = Infinity
   let right = -Infinity
   let top = Infinity
   let bottom = -Infinity
   for (const id of ids) {
-    const it = get(id)
-    if (!it) continue
-    left = Math.min(left, it.x)
-    right = Math.max(right, it.x + it.width)
-    top = Math.min(top, it.y)
-    bottom = Math.max(bottom, it.y + it.height)
+    const f = worldFrame(nodes, definitions, id)
+    if (!f) continue
+    left = Math.min(left, f.x)
+    right = Math.max(right, f.x + f.width)
+    top = Math.min(top, f.y)
+    bottom = Math.max(bottom, f.y + f.height)
   }
   if (!Number.isFinite(left)) return null
   return {
@@ -237,30 +359,42 @@ function unionBounds(
   }
 }
 
-function collectSnapTargetsX(exclude: Set<string>, itemsList: CanvasItem[]): number[] {
+function collectSnapTargetsX(
+  exclude: Set<string>,
+  nodes: Map<string, SceneNode>,
+  definitions: Map<string, ComponentDefinition>,
+): number[] {
   const t = new Set<number>()
   t.add(0)
   t.add(VIEW_W / 2)
   t.add(VIEW_W)
-  for (const it of itemsList) {
-    if (exclude.has(it.id)) continue
-    t.add(it.x)
-    t.add(it.x + it.width / 2)
-    t.add(it.x + it.width)
+  for (const n of nodes.values()) {
+    if (exclude.has(n.id)) continue
+    const f = worldFrame(nodes, definitions, n.id)
+    if (!f) continue
+    t.add(f.x)
+    t.add(f.x + f.width / 2)
+    t.add(f.x + f.width)
   }
   return [...t]
 }
 
-function collectSnapTargetsY(exclude: Set<string>, itemsList: CanvasItem[]): number[] {
+function collectSnapTargetsY(
+  exclude: Set<string>,
+  nodes: Map<string, SceneNode>,
+  definitions: Map<string, ComponentDefinition>,
+): number[] {
   const t = new Set<number>()
   t.add(0)
   t.add(VIEW_H / 2)
   t.add(VIEW_H)
-  for (const it of itemsList) {
-    if (exclude.has(it.id)) continue
-    t.add(it.y)
-    t.add(it.y + it.height / 2)
-    t.add(it.y + it.height)
+  for (const n of nodes.values()) {
+    if (exclude.has(n.id)) continue
+    const f = worldFrame(nodes, definitions, n.id)
+    if (!f) continue
+    t.add(f.y)
+    t.add(f.y + f.height / 2)
+    t.add(f.y + f.height)
   }
   return [...t]
 }
@@ -317,7 +451,7 @@ function escapeXml(s: string): string {
     .replace(/"/g, '&quot;')
 }
 
-function itemLabel(item: CanvasItem): string {
+function itemLabel(item: SceneNode, definitions: Map<string, ComponentDefinition>): string {
   switch (item.type) {
     case 'rect':
       return 'Rectangle'
@@ -327,10 +461,16 @@ function itemLabel(item: CanvasItem): string {
       return item.content.slice(0, 24) || 'Text'
     case 'image':
       return 'Image'
+    case 'group':
+      return 'Group'
+    case 'instance': {
+      const d = definitions.get(item.componentId)
+      return d ? `Instance · ${d.name}` : 'Instance'
+    }
   }
 }
 
-function buildSvgFragment(item: CanvasItem): string {
+function buildSvgFragmentLeaf(item: SceneLeaf): string {
   switch (item.type) {
     case 'rect':
       return `<rect x="${item.x}" y="${item.y}" width="${item.width}" height="${item.height}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${item.strokeWidth}"/>`
@@ -348,11 +488,52 @@ function buildSvgFragment(item: CanvasItem): string {
   }
 }
 
-function serializeSvg(items: CanvasItem[], w: number, h: number): string {
-  const body = items.map((i) => buildSvgFragment(i)).join('\n  ')
+function serializeDefSubtreeSvg(def: ComponentDefinition, id: string, indent: string): string {
+  const n = def.nodes[id]
+  if (!n) return ''
+  if (n.type === 'group') {
+    const inner = n.childIds.map((cid) => serializeDefSubtreeSvg(def, cid, `${indent}  `)).join('\n')
+    return `${indent}<g transform="translate(${n.x} ${n.y})">\n${inner}\n${indent}</g>`
+  }
+  return `${indent}${buildSvgFragmentLeaf(n)}`
+}
+
+function serializeSceneSubtreeSvg(
+  nodes: Map<string, SceneNode>,
+  definitions: Map<string, ComponentDefinition>,
+  id: string,
+  indent: string,
+): string {
+  const n = nodes.get(id)
+  if (!n) return ''
+  if (n.type === 'group') {
+    const inner = n.childIds
+      .map((cid) => serializeSceneSubtreeSvg(nodes, definitions, cid, `${indent}  `))
+      .join('\n')
+    return `${indent}<g transform="translate(${n.x} ${n.y})">\n${inner}\n${indent}</g>`
+  }
+  if (n.type === 'instance') {
+    const def = definitions.get(n.componentId)
+    if (!def) return ''
+    const sx = n.width / Math.max(1e-6, def.intrinsicW)
+    const sy = n.height / Math.max(1e-6, def.intrinsicH)
+    const inner = serializeDefSubtreeSvg(def, def.rootId, `${indent}  `)
+    return `${indent}<g transform="translate(${n.x} ${n.y}) scale(${sx} ${sy})">\n${inner}\n${indent}</g>`
+  }
+  return `${indent}${buildSvgFragmentLeaf(n)}`
+}
+
+function serializeSvgFromRoots(
+  rootIds: string[],
+  nodes: Map<string, SceneNode>,
+  definitions: Map<string, ComponentDefinition>,
+  w: number,
+  h: number,
+): string {
+  const body = rootIds.map((rid) => serializeSceneSubtreeSvg(nodes, definitions, rid, '  ')).join('\n')
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
-  ${body}
+${body}
 </svg>
 `
 }
@@ -368,7 +549,8 @@ function downloadSvg(svg: string, filename: string): void {
   URL.revokeObjectURL(url)
 }
 
-const STORAGE_KEY = 'pop-studio-state-v1'
+const STORAGE_KEY_V2 = 'pop-studio-state-v2'
+const STORAGE_KEY_V1 = 'pop-studio-state-v1'
 
 type PersistedStateV1 = {
   v: 1
@@ -381,6 +563,22 @@ type PersistedStateV1 = {
   viewTx?: number
   viewTy?: number
   viewScale?: number
+}
+
+type PersistedStateV2 = {
+  v: 2
+  rootIds: string[]
+  nodes: Record<string, SceneNode>
+  layerNames: Record<string, string>
+  definitions: Record<string, ComponentDefinition>
+  defaultFill: string
+  defaultStroke: string
+  defaultStrokeWidth: number
+  symmetryGuidesOn: boolean
+  viewTx?: number
+  viewTy?: number
+  viewScale?: number
+  editingComponentId?: string | null
 }
 
 function isValidCanvasItem(x: unknown): x is CanvasItem {
@@ -410,8 +608,120 @@ function isValidCanvasItem(x: unknown): x is CanvasItem {
   }
 }
 
+function isValidSceneNode(x: unknown): x is SceneNode {
+  if (!x || typeof x !== 'object') return false
+  const o = x as Record<string, unknown>
+  if (typeof o.id !== 'string' || typeof o.type !== 'string') return false
+  const n = (k: string) => typeof o[k] === 'number'
+  const s = (k: string) => typeof o[k] === 'string'
+  const parentOk = o.parentId === null || typeof o.parentId === 'string'
+  if (!parentOk) return false
+  switch (o.type) {
+    case 'group':
+      return (
+        n('x') &&
+        n('y') &&
+        n('width') &&
+        n('height') &&
+        Array.isArray(o.childIds) &&
+        (o.childIds as unknown[]).every((c) => typeof c === 'string')
+      )
+    case 'instance':
+      return n('x') && n('y') && n('width') && n('height') && s('componentId')
+    case 'rect':
+    case 'ellipse':
+      return (
+        n('x') &&
+        n('y') &&
+        n('width') &&
+        n('height') &&
+        s('fill') &&
+        s('stroke') &&
+        typeof o.strokeWidth === 'number'
+      )
+    case 'text':
+      return n('x') && n('y') && n('width') && n('height') && s('content') && n('fontSize') && s('fill')
+    case 'image':
+      return n('x') && n('y') && n('width') && n('height') && s('href')
+    default:
+      return false
+  }
+}
+
+function isValidDefNode(x: unknown): x is DefNode {
+  return isValidSceneNode(x) && (x as SceneNode).type !== 'instance'
+}
+
+function isValidComponentDefinition(x: unknown): x is ComponentDefinition {
+  if (!x || typeof x !== 'object') return false
+  const o = x as Record<string, unknown>
+  if (typeof o.id !== 'string' || typeof o.name !== 'string') return false
+  if (typeof o.rootId !== 'string') return false
+  if (typeof o.intrinsicW !== 'number' || typeof o.intrinsicH !== 'number') return false
+  if (!o.nodes || typeof o.nodes !== 'object') return false
+  const nodes = o.nodes as Record<string, unknown>
+  for (const k of Object.keys(nodes)) {
+    if (!isValidDefNode(nodes[k])) return false
+  }
+  return true
+}
+
+function migrateV1ToScene(items: CanvasItem[]): { rootIds: string[]; nodes: Map<string, SceneNode> } {
+  const nodes = new Map<string, SceneNode>()
+  const rootIds = items.map((it) => {
+    const base = { id: it.id, parentId: null as string | null }
+    if (it.type === 'rect') {
+      nodes.set(it.id, { ...base, ...it })
+    } else if (it.type === 'ellipse') {
+      nodes.set(it.id, { ...base, ...it })
+    } else if (it.type === 'text') {
+      nodes.set(it.id, { ...base, ...it })
+    } else {
+      nodes.set(it.id, { ...base, ...it })
+    }
+    return it.id
+  })
+  return { rootIds, nodes }
+}
+
+function recordToNodes(r: Record<string, SceneNode>): Map<string, SceneNode> {
+  const m = new Map<string, SceneNode>()
+  for (const k of Object.keys(r)) {
+    const n = r[k]
+    if (n && isValidSceneNode(n)) m.set(k, n)
+  }
+  return m
+}
+
+function nodesToRecord(nodes: Map<string, SceneNode>): Record<string, SceneNode> {
+  const r: Record<string, SceneNode> = {}
+  for (const [k, v] of nodes) r[k] = v
+  return r
+}
+
+function recordToDefs(r: Record<string, ComponentDefinition>): Map<string, ComponentDefinition> {
+  const m = new Map<string, ComponentDefinition>()
+  for (const k of Object.keys(r)) {
+    const d = r[k]
+    if (d && isValidComponentDefinition(d)) m.set(k, d)
+  }
+  return m
+}
+
+function defsToRecord(defs: Map<string, ComponentDefinition>): Record<string, ComponentDefinition> {
+  const r: Record<string, ComponentDefinition> = {}
+  for (const [k, v] of defs) r[k] = v
+  return r
+}
+
 export function mount(root: HTMLElement): void {
-  let items: CanvasItem[] = []
+  let rootIds: string[] = []
+  let nodes = new Map<string, SceneNode>()
+  let definitions = new Map<string, ComponentDefinition>()
+  /** When set, canvas shows definition tree for editing the main component. */
+  let editingComponentId: string | null = null
+  let mainNodesBackup: Map<string, SceneNode> | null = null
+  let mainRootIdsBackup: string[] | null = null
   /** Custom layer names by item id; when missing, UI falls back to `itemLabel`. */
   let layerNames: Record<string, string> = {}
   let selected = new Set<string>()
@@ -513,12 +823,28 @@ export function mount(root: HTMLElement): void {
         <button type="button" class="pop-btn pop-primary" id="pop-export-sel">Download selected as SVG</button>
         <button type="button" class="pop-btn" id="pop-export-all">Download full canvas</button>
         <button type="button" class="pop-btn pop-danger" id="pop-delete" disabled>Delete</button>
+        <span class="pop-sep"></span>
+        <button type="button" class="pop-btn" id="pop-group" disabled>Group</button>
+        <button type="button" class="pop-btn" id="pop-ungroup" disabled>Ungroup</button>
+        <span class="pop-sep"></span>
+        <button type="button" class="pop-btn" id="pop-create-comp" disabled>Create component</button>
+        <button type="button" class="pop-btn" id="pop-detach" disabled>Detach instance</button>
+        <button type="button" class="pop-btn" id="pop-edit-comp" disabled>Edit main</button>
+        <label class="pop-comp-insert">
+          <span class="pop-label">Insert</span>
+          <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
+          <button type="button" class="pop-btn" id="pop-insert-inst">Instance</button>
+        </label>
         <input type="file" id="pop-file" accept="image/*" hidden />
+      </div>
+      <div class="pop-comp-banner" id="pop-comp-banner" hidden>
+        <span id="pop-comp-banner-text"></span>
+        <button type="button" class="pop-btn pop-primary" id="pop-comp-done">Done editing</button>
       </div>
       <div class="pop-main">
         <aside class="pop-layers" aria-label="Layers and transform">
           <h2>Layers</h2>
-          <ul class="pop-layer-list" id="pop-layers"></ul>
+          <ul class="pop-layer-list" id="pop-layers" data-pop-layer-tree></ul>
           <div class="pop-props">
             <h2>Transform</h2>
             <div class="pop-prop-grid" id="pop-prop-grid">
@@ -542,8 +868,8 @@ export function mount(root: HTMLElement): void {
                 <path d="M 16 0 L 0 0 0 16" fill="none" stroke="var(--canvas-line)" stroke-width="0.5"/>
               </pattern>
             </defs>
+            <rect class="pop-canvas-bg" x="0" y="0" width="${VIEW_W}" height="${VIEW_H}" fill="url(#pop-grid)" pointer-events="none"/>
             <g id="pop-viewport" transform="translate(0 0) scale(1)">
-              <rect class="pop-canvas-bg" x="0" y="0" width="${VIEW_W}" height="${VIEW_H}" fill="url(#pop-grid)"/>
               <g id="pop-guides-back" pointer-events="none"></g>
               <g id="pop-items"></g>
               <g id="pop-handles"></g>
@@ -568,6 +894,16 @@ export function mount(root: HTMLElement): void {
   const btnExportSel = root.querySelector<HTMLButtonElement>('#pop-export-sel')!
   const btnExportAll = root.querySelector<HTMLButtonElement>('#pop-export-all')!
   const btnDelete = root.querySelector<HTMLButtonElement>('#pop-delete')!
+  const btnGroup = root.querySelector<HTMLButtonElement>('#pop-group')!
+  const btnUngroup = root.querySelector<HTMLButtonElement>('#pop-ungroup')!
+  const btnCreateComp = root.querySelector<HTMLButtonElement>('#pop-create-comp')!
+  const btnDetach = root.querySelector<HTMLButtonElement>('#pop-detach')!
+  const btnEditComp = root.querySelector<HTMLButtonElement>('#pop-edit-comp')!
+  const selCompPick = root.querySelector<HTMLSelectElement>('#pop-comp-pick')!
+  const btnInsertInst = root.querySelector<HTMLButtonElement>('#pop-insert-inst')!
+  const compBanner = root.querySelector<HTMLElement>('#pop-comp-banner')!
+  const compBannerText = root.querySelector<HTMLElement>('#pop-comp-banner-text')!
+  const btnCompDone = root.querySelector<HTMLButtonElement>('#pop-comp-done')!
   const toolButtons = root.querySelectorAll<HTMLButtonElement>('.pop-tool')
   const guidesBack = root.querySelector<SVGGElement>('#pop-guides-back')!
   const guidesFront = root.querySelector<SVGGElement>('#pop-guides-front')!
@@ -765,10 +1101,12 @@ export function mount(root: HTMLElement): void {
 
   function persistToStorage(): void {
     try {
-      const payload: PersistedStateV1 = {
-        v: 1,
-        items,
-        layerNames,
+      const payload: PersistedStateV2 = {
+        v: 2,
+        rootIds: [...rootIds],
+        nodes: nodesToRecord(nodes),
+        layerNames: { ...layerNames },
+        definitions: defsToRecord(definitions),
         defaultFill,
         defaultStroke,
         defaultStrokeWidth,
@@ -776,8 +1114,9 @@ export function mount(root: HTMLElement): void {
         viewTx,
         viewTy,
         viewScale,
+        editingComponentId,
       }
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+      localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(payload))
     } catch {
       /* quota or private mode */
     }
@@ -791,49 +1130,83 @@ export function mount(root: HTMLElement): void {
     }, 160)
   }
 
+  function applyLoadedView(data: {
+    defaultFill?: string
+    defaultStroke?: string
+    defaultStrokeWidth?: number
+    symmetryGuidesOn?: boolean
+    viewTx?: number
+    viewTy?: number
+    viewScale?: number
+  }): void {
+    if (typeof data.defaultFill === 'string') {
+      defaultFill = data.defaultFill
+      fillInput.value = defaultFill
+    }
+    if (typeof data.defaultStroke === 'string') {
+      defaultStroke = data.defaultStroke
+      strokeInput.value = defaultStroke
+    }
+    if (typeof data.defaultStrokeWidth === 'number' && Number.isFinite(data.defaultStrokeWidth)) {
+      defaultStrokeWidth = clamp(Math.round(data.defaultStrokeWidth), 0, 12)
+      strokeWInput.value = String(defaultStrokeWidth)
+    }
+    if (typeof data.symmetryGuidesOn === 'boolean') {
+      symmetryGuidesOn = data.symmetryGuidesOn
+      guidesCheckbox.checked = symmetryGuidesOn
+    }
+    if (
+      typeof data.viewTx === 'number' &&
+      Number.isFinite(data.viewTx) &&
+      typeof data.viewTy === 'number' &&
+      Number.isFinite(data.viewTy) &&
+      typeof data.viewScale === 'number' &&
+      Number.isFinite(data.viewScale)
+    ) {
+      viewTx = data.viewTx
+      viewTy = data.viewTy
+      viewScale = clamp(data.viewScale, MIN_VIEW_SCALE, MAX_VIEW_SCALE)
+    }
+  }
+
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) {
-      const data = JSON.parse(raw) as Partial<PersistedStateV1>
-      if (data.v === 1 && Array.isArray(data.items)) {
-        const next = data.items.filter(isValidCanvasItem)
-        if (next.length > 0 || data.items.length === 0) {
-          items = next
+    const rawV2 = localStorage.getItem(STORAGE_KEY_V2)
+    if (rawV2) {
+      const data = JSON.parse(rawV2) as Partial<PersistedStateV2>
+      if (data.v === 2 && data.nodes && typeof data.nodes === 'object' && Array.isArray(data.rootIds)) {
+        nodes = recordToNodes(data.nodes as Record<string, SceneNode>)
+        rootIds = data.rootIds.filter((id) => nodes.has(id))
+        if (data.definitions && typeof data.definitions === 'object') {
+          definitions = recordToDefs(data.definitions as Record<string, ComponentDefinition>)
         }
         if (data.layerNames && typeof data.layerNames === 'object') {
           layerNames = { ...data.layerNames }
         }
-        const ids = new Set(items.map((i) => i.id))
+        editingComponentId =
+          typeof data.editingComponentId === 'string' ? data.editingComponentId : null
+        const keepIds = new Set(nodes.keys())
         for (const k of Object.keys(layerNames)) {
-          if (!ids.has(k)) delete layerNames[k]
+          if (!keepIds.has(k)) delete layerNames[k]
         }
-        if (typeof data.defaultFill === 'string') {
-          defaultFill = data.defaultFill
-          fillInput.value = defaultFill
-        }
-        if (typeof data.defaultStroke === 'string') {
-          defaultStroke = data.defaultStroke
-          strokeInput.value = defaultStroke
-        }
-        if (typeof data.defaultStrokeWidth === 'number' && Number.isFinite(data.defaultStrokeWidth)) {
-          defaultStrokeWidth = clamp(Math.round(data.defaultStrokeWidth), 0, 12)
-          strokeWInput.value = String(defaultStrokeWidth)
-        }
-        if (typeof data.symmetryGuidesOn === 'boolean') {
-          symmetryGuidesOn = data.symmetryGuidesOn
-          guidesCheckbox.checked = symmetryGuidesOn
-        }
-        if (
-          typeof data.viewTx === 'number' &&
-          Number.isFinite(data.viewTx) &&
-          typeof data.viewTy === 'number' &&
-          Number.isFinite(data.viewTy) &&
-          typeof data.viewScale === 'number' &&
-          Number.isFinite(data.viewScale)
-        ) {
-          viewTx = data.viewTx
-          viewTy = data.viewTy
-          viewScale = clamp(data.viewScale, MIN_VIEW_SCALE, MAX_VIEW_SCALE)
+        applyLoadedView(data)
+      }
+    } else {
+      const rawV1 = localStorage.getItem(STORAGE_KEY_V1)
+      if (rawV1) {
+        const data = JSON.parse(rawV1) as Partial<PersistedStateV1>
+        if (data.v === 1 && Array.isArray(data.items)) {
+          const next = data.items.filter(isValidCanvasItem)
+          const mig = migrateV1ToScene(next)
+          rootIds = mig.rootIds
+          nodes = mig.nodes
+          if (data.layerNames && typeof data.layerNames === 'object') {
+            layerNames = { ...data.layerNames }
+          }
+          const ids = new Set(nodes.keys())
+          for (const k of Object.keys(layerNames)) {
+            if (!ids.has(k)) delete layerNames[k]
+          }
+          applyLoadedView(data)
         }
       }
     }
@@ -1063,12 +1436,225 @@ export function mount(root: HTMLElement): void {
     renderHandles()
   }
 
-  function getItemById(id: string): CanvasItem | undefined {
-    return items.find((i) => i.id === id)
+  function getNode(id: string): SceneNode | undefined {
+    return nodes.get(id)
+  }
+
+  function removeChildRef(parentId: string | null, childId: string): void {
+    if (parentId === null) {
+      rootIds = rootIds.filter((id) => id !== childId)
+    } else {
+      const p = nodes.get(parentId)
+      if (p?.type === 'group') {
+        p.childIds = p.childIds.filter((id) => id !== childId)
+      }
+    }
+  }
+
+  function insertChildRef(parentId: string | null, childId: string, index: number): void {
+    const child = nodes.get(childId)
+    if (!child) return
+    removeChildRef(child.parentId, childId)
+    child.parentId = parentId
+    if (parentId === null) {
+      const i = clamp(index, 0, rootIds.length)
+      rootIds.splice(i, 0, childId)
+    } else {
+      const p = nodes.get(parentId)
+      if (p?.type === 'group') {
+        const i = clamp(index, 0, p.childIds.length)
+        const next = [...p.childIds]
+        next.splice(i, 0, childId)
+        p.childIds = next
+      }
+    }
+  }
+
+  function selectedDeletionRoots(): string[] {
+    const sel = [...selected]
+    return sel.filter(
+      (id) => !sel.some((o) => o !== id && isDescendant(nodes, o, id)),
+    )
+  }
+
+  function deleteNodesSubtrees(ids: Iterable<string>): void {
+    for (const id of ids) {
+      const n = nodes.get(id)
+      if (!n) continue
+      removeChildRef(n.parentId, id)
+      for (const x of collectSubtreeIds(nodes, id)) {
+        nodes.delete(x)
+        delete layerNames[x]
+        selected.delete(x)
+      }
+    }
+  }
+
+  function defSubtreeBounds(
+    def: ComponentDefinition,
+    id: string,
+    ox: number,
+    oy: number,
+  ): { minX: number; minY: number; maxX: number; maxY: number } | null {
+    const n = def.nodes[id]
+    if (!n) return null
+    if (n.type === 'group') {
+      let minX = Infinity
+      let minY = Infinity
+      let maxX = -Infinity
+      let maxY = -Infinity
+      const gx = ox + n.x
+      const gy = oy + n.y
+      for (const cid of n.childIds) {
+        const b = defSubtreeBounds(def, cid, gx, gy)
+        if (b) {
+          minX = Math.min(minX, b.minX)
+          minY = Math.min(minY, b.minY)
+          maxX = Math.max(maxX, b.maxX)
+          maxY = Math.max(maxY, b.maxY)
+        }
+      }
+      if (!Number.isFinite(minX)) {
+        return { minX: gx, minY: gy, maxX: gx + n.width, maxY: gy + n.height }
+      }
+      return { minX, minY, maxX, maxY }
+    }
+    const lx = ox + n.x
+    const ly = oy + n.y
+    return { minX: lx, minY: ly, maxX: lx + n.width, maxY: ly + n.height }
+  }
+
+  function normalizeDefinitionOrigin(def: ComponentDefinition): void {
+    const b = defSubtreeBounds(def, def.rootId, 0, 0)
+    if (!b) return
+    const dx = -b.minX
+    const dy = -b.minY
+    const root = def.nodes[def.rootId]
+    if (root) {
+      root.x += dx
+      root.y += dy
+    }
+    def.intrinsicW = Math.max(MIN_ITEM_SIZE, b.maxX - b.minX)
+    def.intrinsicH = Math.max(MIN_ITEM_SIZE, b.maxY - b.minY)
+  }
+
+  function recomputeIntrinsic(def: ComponentDefinition): void {
+    const b = defSubtreeBounds(def, def.rootId, 0, 0)
+    if (!b) {
+      def.intrinsicW = 100
+      def.intrinsicH = 100
+      return
+    }
+    def.intrinsicW = Math.max(MIN_ITEM_SIZE, b.maxX - b.minX)
+    def.intrinsicH = Math.max(MIN_ITEM_SIZE, b.maxY - b.minY)
+  }
+
+  function hitTestWorld(wx: number, wy: number): string | null {
+    for (let ri = rootIds.length - 1; ri >= 0; ri--) {
+      const h = hitNode(wx, wy, rootIds[ri]!, nodes)
+      if (h) return h
+    }
+    return null
+  }
+
+  function hitNode(plx: number, ply: number, id: string, nodeMap: Map<string, SceneNode>): string | null {
+    const n = nodeMap.get(id)
+    if (!n) return null
+    if (n.type === 'group') {
+      const lx = plx - n.x
+      const ly = ply - n.y
+      for (let i = n.childIds.length - 1; i >= 0; i--) {
+        const h = hitNode(lx, ly, n.childIds[i]!, nodeMap)
+        if (h) return h
+      }
+      return null
+    }
+    if (plx < n.x || plx > n.x + n.width || ply < n.y || ply > n.y + n.height) return null
+    return id
+  }
+
+  function updateCompPickList(): void {
+    selCompPick.replaceChildren()
+    const opt0 = document.createElement('option')
+    opt0.value = ''
+    opt0.textContent = definitions.size === 0 ? 'No components' : 'Pick…'
+    selCompPick.appendChild(opt0)
+    for (const d of definitions.values()) {
+      const o = document.createElement('option')
+      o.value = d.id
+      o.textContent = d.name
+      selCompPick.appendChild(o)
+    }
+    btnInsertInst.disabled = definitions.size === 0 || selCompPick.value === ''
+  }
+
+  function updateComponentBanner(): void {
+    if (editingComponentId) {
+      const d = definitions.get(editingComponentId)
+      compBanner.hidden = false
+      compBannerText.textContent = d
+        ? `Editing main component: ${d.name}`
+        : 'Editing component'
+    } else {
+      compBanner.hidden = true
+    }
+  }
+
+  function enterComponentEdit(compId: string): void {
+    const d = definitions.get(compId)
+    if (!d) return
+    mainNodesBackup = new Map(nodes)
+    mainRootIdsBackup = [...rootIds]
+    nodes = recordToNodes({ ...d.nodes } as Record<string, SceneNode>)
+    rootIds = [d.rootId]
+    editingComponentId = compId
+    selected.clear()
+    updateComponentBanner()
+    commit()
+  }
+
+  function exitComponentEdit(save: boolean): void {
+    if (!editingComponentId || !mainNodesBackup || !mainRootIdsBackup) {
+      editingComponentId = null
+      mainNodesBackup = null
+      mainRootIdsBackup = null
+      updateComponentBanner()
+      return
+    }
+    const compId = editingComponentId
+    if (save) {
+      const d = definitions.get(compId)
+      if (d) {
+        d.nodes = nodesToRecord(nodes) as Record<string, DefNode>
+        normalizeDefinitionOrigin(d)
+      }
+    }
+    nodes = mainNodesBackup
+    rootIds = mainRootIdsBackup
+    mainNodesBackup = null
+    mainRootIdsBackup = null
+    editingComponentId = null
+    updateComponentBanner()
+    commit()
+  }
+
+  function updateHierarchyButtons(): void {
+    const n = selected.size
+    const one = n === 1 ? getNode([...selected][0]!) : undefined
+    btnGroup.disabled = n < 2 || editingComponentId !== null
+    btnUngroup.disabled = one?.type !== 'group' || one.childIds.length === 0 || editingComponentId !== null
+    const canComp =
+      n >= 1 &&
+      editingComponentId === null &&
+      [...selected].every((id) => getNode(id)?.type !== 'instance')
+    btnCreateComp.disabled = !canComp
+    btnDetach.disabled = one?.type !== 'instance' || editingComponentId !== null
+    btnEditComp.disabled = one?.type !== 'instance' || editingComponentId !== null
   }
 
   function updateSelectionUi(): void {
     btnDelete.disabled = selected.size === 0
+    updateHierarchyButtons()
     layerList.querySelectorAll<HTMLLIElement>('.pop-layer').forEach((li) => {
       const id = li.dataset.id
       if (!id) return
@@ -1082,9 +1668,205 @@ export function mount(root: HTMLElement): void {
   }
 
   function pruneLayerNames(): void {
-    const ids = new Set(items.map((i) => i.id))
+    const ids = new Set(nodes.keys())
     for (const k of Object.keys(layerNames)) {
       if (!ids.has(k)) delete layerNames[k]
+    }
+  }
+
+  let layerDragId: string | null = null
+  let layerDropTargetId: string | null = null
+  let layerDropKind: 'before' | 'into' | null = null
+
+  function siblingListForParent(parentId: string | null): string[] {
+    if (parentId === null) return rootIds
+    const p = nodes.get(parentId)
+    return p?.type === 'group' ? p.childIds : []
+  }
+
+  function indexInParent(childId: string): { parentId: string | null; index: number } | null {
+    const n = nodes.get(childId)
+    if (!n) return null
+    const list = siblingListForParent(n.parentId)
+    const idx = list.indexOf(childId)
+    if (idx < 0) return null
+    return { parentId: n.parentId, index: idx }
+  }
+
+  function moveLayerNode(
+    dragId: string,
+    targetId: string,
+    kind: 'before' | 'into',
+  ): void {
+    if (dragId === targetId) return
+    if (kind === 'into' && isDescendant(nodes, dragId, targetId)) return
+    const info = indexInParent(dragId)
+    if (!info) return
+    removeChildRef(info.parentId, dragId)
+    if (kind === 'into') {
+      const t = nodes.get(targetId)
+      if (t?.type !== 'group') return
+      const n = nodes.get(dragId)
+      if (!n) return
+      n.parentId = targetId
+      t.childIds.push(dragId)
+      return
+    }
+    const tInfo = indexInParent(targetId)
+    if (!tInfo) return
+    const n = nodes.get(dragId)
+    if (!n) return
+    let insertIdx = tInfo.index
+    if (tInfo.parentId === info.parentId && info.index < tInfo.index) insertIdx -= 1
+    n.parentId = tInfo.parentId
+    if (tInfo.parentId === null) {
+      rootIds.splice(insertIdx, 0, dragId)
+    } else {
+      const p = nodes.get(tInfo.parentId)
+      if (p?.type === 'group') {
+        const next = [...p.childIds]
+        next.splice(insertIdx, 0, dragId)
+        p.childIds = next
+      }
+    }
+  }
+
+  function renderLayerBranch(host: HTMLUListElement, parentId: string | null, depth: number): void {
+    const ids = siblingListForParent(parentId)
+    for (let i = ids.length - 1; i >= 0; i--) {
+      const id = ids[i]!
+      const item = nodes.get(id)
+      if (!item) continue
+      const li = document.createElement('li')
+      li.className = 'pop-layer'
+      li.dataset.id = id
+      li.dataset.depth = String(depth)
+      li.style.setProperty('--pop-layer-depth', String(depth))
+
+      const row = document.createElement('div')
+      row.className = 'pop-layer-row'
+
+      const dragEl = document.createElement('span')
+      dragEl.className = 'pop-layer-drag'
+      dragEl.draggable = true
+      dragEl.setAttribute('aria-hidden', 'true')
+      dragEl.textContent = '⠿'
+      dragEl.addEventListener('dragstart', (e) => {
+        layerDragId = id
+        e.dataTransfer?.setData('text/plain', id)
+        e.dataTransfer!.effectAllowed = 'move'
+        li.classList.add('pop-layer-dragging')
+      })
+      dragEl.addEventListener('dragend', () => {
+        layerDragId = null
+        layerDropTargetId = null
+        layerDropKind = null
+        layerList.querySelectorAll('.pop-layer-drop-before, .pop-layer-drop-into').forEach((el) => {
+          el.classList.remove('pop-layer-drop-before', 'pop-layer-drop-into')
+        })
+        li.classList.remove('pop-layer-dragging')
+      })
+
+      const input = document.createElement('input')
+      input.type = 'text'
+      input.className = 'pop-layer-name'
+      input.spellcheck = false
+      input.placeholder = itemLabel(item, definitions)
+      input.value = layerNames[id] ?? ''
+      input.setAttribute('aria-label', 'Layer name')
+      input.addEventListener('pointerdown', (e) => e.stopPropagation())
+      input.addEventListener('click', (e) => e.stopPropagation())
+      input.addEventListener('focus', () => {
+        selected = new Set([id])
+        updateSelectionUi()
+        syncPropsFromSelection()
+        renderHandles()
+      })
+      input.addEventListener('input', () => {
+        const raw = input.value
+        if (raw.trim() === '') delete layerNames[id]
+        else layerNames[id] = raw
+        schedulePersist()
+      })
+      input.addEventListener('blur', () => {
+        const v = input.value.trim()
+        if (v === '') {
+          delete layerNames[id]
+          input.value = ''
+        } else {
+          layerNames[id] = v
+          input.value = v
+        }
+        schedulePersist()
+      })
+
+      row.appendChild(dragEl)
+      row.appendChild(input)
+      li.appendChild(row)
+
+      li.addEventListener('dragover', (e) => {
+        if (!layerDragId || layerDragId === id) return
+        e.preventDefault()
+        e.dataTransfer!.dropEffect = 'move'
+        const rect = li.getBoundingClientRect()
+        const into = item.type === 'group' && e.clientY > rect.top + rect.height * 0.35
+        layerList.querySelectorAll('.pop-layer-drop-before, .pop-layer-drop-into').forEach((el) => {
+          el.classList.remove('pop-layer-drop-before', 'pop-layer-drop-into')
+        })
+        if (into) {
+          li.classList.add('pop-layer-drop-into')
+          layerDropKind = 'into'
+        } else {
+          li.classList.add('pop-layer-drop-before')
+          layerDropKind = 'before'
+        }
+        layerDropTargetId = id
+      })
+
+      li.addEventListener('dragleave', () => {
+        li.classList.remove('pop-layer-drop-before', 'pop-layer-drop-into')
+      })
+
+      li.addEventListener('drop', (e) => {
+        e.preventDefault()
+        const from = layerDragId ?? e.dataTransfer?.getData('text/plain')
+        if (!from || !layerDropTargetId || !layerDropKind) return
+        moveLayerNode(from, layerDropTargetId, layerDropKind)
+        layerDragId = null
+        layerDropTargetId = null
+        layerDropKind = null
+        commit()
+      })
+
+      li.addEventListener('dblclick', (e) => {
+        if ((e.target as Element).closest('.pop-layer-name')) return
+        if (item.type === 'instance') {
+          enterComponentEdit(item.componentId)
+        }
+      })
+
+      li.addEventListener('click', (e) => {
+        if ((e.target as Element).closest('.pop-layer-name')) return
+        if ((e.target as Element).closest('.pop-layer-drag')) return
+        if (e.shiftKey) {
+          if (selected.has(id)) selected.delete(id)
+          else selected.add(id)
+        } else {
+          selected = new Set([id])
+        }
+        updateSelectionUi()
+        syncPropsFromSelection()
+        renderHandles()
+      })
+
+      host.appendChild(li)
+
+      if (item.type === 'group') {
+        const sub = document.createElement('ul')
+        sub.className = 'pop-layer-nested'
+        renderLayerBranch(sub, id, depth + 1)
+        host.appendChild(sub)
+      }
     }
   }
 
@@ -1104,62 +1886,20 @@ export function mount(root: HTMLElement): void {
     }
 
     layerList.replaceChildren()
-    for (let i = items.length - 1; i >= 0; i--) {
-      const item = items[i]!
-      const li = document.createElement('li')
-      li.className = 'pop-layer'
-      li.dataset.id = item.id
-      const input = document.createElement('input')
-      input.type = 'text'
-      input.className = 'pop-layer-name'
-      input.spellcheck = false
-      input.placeholder = itemLabel(item)
-      input.value = layerNames[item.id] ?? ''
-      input.setAttribute('aria-label', 'Layer name')
-      input.addEventListener('pointerdown', (e) => e.stopPropagation())
-      input.addEventListener('click', (e) => e.stopPropagation())
-      input.addEventListener('focus', () => {
-        selected = new Set([item.id])
-        updateSelectionUi()
-        syncPropsFromSelection()
-        renderHandles()
-      })
-      input.addEventListener('input', () => {
-        const raw = input.value
-        if (raw.trim() === '') delete layerNames[item.id]
-        else layerNames[item.id] = raw
-        schedulePersist()
-      })
-      input.addEventListener('blur', () => {
-        const v = input.value.trim()
-        if (v === '') {
-          delete layerNames[item.id]
-          input.value = ''
-        } else {
-          layerNames[item.id] = v
-          input.value = v
-        }
-        schedulePersist()
-      })
-      li.appendChild(input)
-      li.addEventListener('click', (e) => {
-        if ((e.target as Element).closest('.pop-layer-name')) return
-        if (e.shiftKey) {
-          if (selected.has(item.id)) selected.delete(item.id)
-          else selected.add(item.id)
-        } else {
-          selected = new Set([item.id])
-        }
-        updateSelectionUi()
-        syncPropsFromSelection()
-        renderHandles()
-      })
-      layerList.appendChild(li)
-    }
+    renderLayerBranch(layerList, null, 0)
+
+    layerList.addEventListener(
+      'dragover',
+      (e) => {
+        if (!layerDragId) return
+        e.preventDefault()
+      },
+      { passive: false },
+    )
 
     if (preserveId) {
       const inp = layerList.querySelector<HTMLInputElement>(
-        `li.pop-layer[data-id="${preserveId}"] .pop-layer-name`,
+        `li.pop-layer[data-id="${CSS.escape(preserveId)}"] .pop-layer-name`,
       )
       if (inp) {
         inp.focus()
@@ -1174,6 +1914,7 @@ export function mount(root: HTMLElement): void {
       }
     }
     updateSelectionUi()
+    updateCompPickList()
   }
 
   function renderItems(): void {

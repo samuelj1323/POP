@@ -454,10 +454,18 @@ body {
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: auto;
-  background: var(--surface);
+  /* Match SVG #pop-grid so margins around the artboard stay gridded when zoomed out. */
+  background-color: var(--canvas-cell);
+  background-image:
+    linear-gradient(var(--canvas-line) 0.5px, transparent 0.5px),
+    linear-gradient(90deg, var(--canvas-line) 0.5px, transparent 0.5px);
+  background-size: 16px 16px;
+  background-position: 0 0;
   padding: 0.75rem;
   display: flex;
   justify-content: center;
+  align-items: center;
+  min-height: min(70vh, 720px);
 }
 
 .pop-canvas {
@@ -467,6 +475,8 @@ body {
   border-radius: 6px;
   cursor: default;
   touch-action: none;
+  flex-shrink: 0;
+  background: transparent;
 }
 
 .pop-canvas.pop-canvas-draw {
