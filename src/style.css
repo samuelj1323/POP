@@ -389,6 +389,40 @@ body {
   color: var(--muted);
 }
 
+.pop-comp-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+  padding: 0.55rem 0.85rem;
+  border-radius: 8px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  font-size: 0.88rem;
+  color: var(--text);
+}
+
+.pop-comp-insert {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.pop-comp-pick {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.25rem 0.35rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  max-width: 9rem;
+}
+
 .pop-layer-list {
   list-style: none;
   margin: 0;
@@ -400,13 +434,57 @@ body {
   overflow: auto;
 }
 
+.pop-layer-nested {
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0 0 0 0.5rem;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.pop-layer-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.pop-layer-drag {
+  flex: 0 0 auto;
+  cursor: grab;
+  font-size: 0.65rem;
+  line-height: 1;
+  color: var(--muted);
+  user-select: none;
+  padding: 0.15rem 0.1rem;
+}
+
+.pop-layer-drag:active {
+  cursor: grabbing;
+}
+
 .pop-layer {
-  padding: 0.45rem 0.55rem;
+  padding: 0.35rem 0.45rem;
+  padding-left: calc(0.45rem + (var(--pop-layer-depth, 0) * 0.35rem));
   border-radius: 6px;
   cursor: pointer;
   font-size: 0.9rem;
   color: var(--muted);
   border: 1px solid transparent;
+}
+
+.pop-layer-drop-before {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+
+.pop-layer-drop-into {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.pop-layer-dragging {
+  opacity: 0.55;
 }
 
 .pop-layer:hover {

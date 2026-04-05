@@ -286,7 +286,7 @@ const HANDLE_CURSORS: Record<ResizeHandleId, string> = {
 
 function worldFrame(
   nodes: Map<string, SceneNode>,
-  definitions: Map<string, ComponentDefinition>,
+  _definitions: Map<string, ComponentDefinition>,
   id: string,
 ): { x: number; y: number; width: number; height: number } | null {
   const n = nodes.get(id)
@@ -488,6 +488,23 @@ function buildSvgFragmentLeaf(item: SceneLeaf): string {
   }
 }
 
+/** Same geometry as `buildSvgFragmentLeaf` but with parent `<g>` already translated by (item.x, item.y). */
+function buildSvgFragmentLeafLocal(item: SceneLeaf): string {
+  switch (item.type) {
+    case 'rect':
+      return `<rect x="0" y="0" width="${item.width}" height="${item.height}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${item.strokeWidth}"/>`
+    case 'ellipse': {
+      const rx = item.width / 2
+      const ry = item.height / 2
+      return `<ellipse cx="${rx}" cy="${ry}" rx="${rx}" ry="${ry}" fill="${escapeXml(item.fill)}" stroke="${escapeXml(item.stroke)}" stroke-width="${item.strokeWidth}"/>`
+    }
+    case 'text':
+      return `<text x="0" y="${item.fontSize}" font-size="${item.fontSize}" font-family="system-ui, sans-serif" fill="${escapeXml(item.fill)}">${escapeXml(item.content)}</text>`
+    case 'image':
+      return `<image href="${escapeXml(item.href)}" x="0" y="0" width="${item.width}" height="${item.height}" preserveAspectRatio="none"/>`
+  }
+}
+
 function serializeDefSubtreeSvg(def: ComponentDefinition, id: string, indent: string): string {
   const n = def.nodes[id]
   if (!n) return ''
@@ -578,7 +595,6 @@ type PersistedStateV2 = {
   viewTx?: number
   viewTy?: number
   viewScale?: number
-  editingComponentId?: string | null
 }
 
 function isValidCanvasItem(x: unknown): x is CanvasItem {
@@ -667,21 +683,59 @@ function isValidComponentDefinition(x: unknown): x is ComponentDefinition {
 }
 
 function migrateV1ToScene(items: CanvasItem[]): { rootIds: string[]; nodes: Map<string, SceneNode> } {
-  const nodes = new Map<string, SceneNode>()
+  const nodeMap = new Map<string, SceneNode>()
   const rootIds = items.map((it) => {
     const base = { id: it.id, parentId: null as string | null }
     if (it.type === 'rect') {
-      nodes.set(it.id, { ...base, ...it })
+      nodeMap.set(it.id, {
+        ...base,
+        type: 'rect',
+        x: it.x,
+        y: it.y,
+        width: it.width,
+        height: it.height,
+        fill: it.fill,
+        stroke: it.stroke,
+        strokeWidth: it.strokeWidth,
+      })
     } else if (it.type === 'ellipse') {
-      nodes.set(it.id, { ...base, ...it })
+      nodeMap.set(it.id, {
+        ...base,
+        type: 'ellipse',
+        x: it.x,
+        y: it.y,
+        width: it.width,
+        height: it.height,
+        fill: it.fill,
+        stroke: it.stroke,
+        strokeWidth: it.strokeWidth,
+      })
     } else if (it.type === 'text') {
-      nodes.set(it.id, { ...base, ...it })
+      nodeMap.set(it.id, {
+        ...base,
+        type: 'text',
+        x: it.x,
+        y: it.y,
+        width: it.width,
+        height: it.height,
+        content: it.content,
+        fontSize: it.fontSize,
+        fill: it.fill,
+      })
     } else {
-      nodes.set(it.id, { ...base, ...it })
+      nodeMap.set(it.id, {
+        ...base,
+        type: 'image',
+        x: it.x,
+        y: it.y,
+        width: it.width,
+        height: it.height,
+        href: it.href,
+      })
     }
     return it.id
   })
-  return { rootIds, nodes }
+  return { rootIds, nodes: nodeMap }
 }
 
 function recordToNodes(r: Record<string, SceneNode>): Map<string, SceneNode> {
@@ -1114,7 +1168,6 @@ export function mount(root: HTMLElement): void {
         viewTx,
         viewTy,
         viewScale,
-        editingComponentId,
       }
       localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(payload))
     } catch {
@@ -1182,8 +1235,7 @@ export function mount(root: HTMLElement): void {
         if (data.layerNames && typeof data.layerNames === 'object') {
           layerNames = { ...data.layerNames }
         }
-        editingComponentId =
-          typeof data.editingComponentId === 'string' ? data.editingComponentId : null
+        editingComponentId = null
         const keepIds = new Set(nodes.keys())
         for (const k of Object.keys(layerNames)) {
           if (!keepIds.has(k)) delete layerNames[k]
@@ -1261,7 +1313,7 @@ export function mount(root: HTMLElement): void {
     }
 
     if (n === 1) {
-      const it = getItemById([...selected][0]!)!
+      const it = getNode([...selected][0]!)!
       inpX.value = String(stripNum(it.x))
       inpY.value = String(stripNum(it.y))
       if (it.type === 'text') {
@@ -1272,6 +1324,14 @@ export function mount(root: HTMLElement): void {
         inpFs.value = String(stripNum(it.fontSize))
         inpW.value = ''
         inpH.value = ''
+      } else if (it.type === 'group' || it.type === 'instance') {
+        inpFs.disabled = true
+        fsWrap.style.display = 'none'
+        pwWrap.style.display = ''
+        phWrap.style.display = ''
+        inpW.value = String(stripNum(it.width))
+        inpH.value = String(stripNum(it.height))
+        inpFs.value = ''
       } else {
         inpFs.disabled = true
         fsWrap.style.display = 'none'
@@ -1291,8 +1351,8 @@ export function mount(root: HTMLElement): void {
     inpX.value = ''
     inpY.value = ''
     inpFs.value = ''
-    const ws = [...selected].map((id) => getItemById(id)!.width)
-    const hs = [...selected].map((id) => getItemById(id)!.height)
+    const ws = [...selected].map((id) => getNode(id)!.width)
+    const hs = [...selected].map((id) => getNode(id)!.height)
     inpW.value = ws.every((w) => w === ws[0]) ? String(stripNum(ws[0]!)) : ''
     inpH.value = hs.every((h) => h === hs[0]) ? String(stripNum(hs[0]!)) : ''
   }
@@ -1301,10 +1361,30 @@ export function mount(root: HTMLElement): void {
     return Math.round(n * 1000) / 1000
   }
 
+  function scaleGroupChildren(gid: string, sx: number, sy: number): void {
+    const g = nodes.get(gid)
+    if (g?.type !== 'group') return
+    for (const cid of g.childIds) {
+      const c = nodes.get(cid)
+      if (!c) continue
+      c.x *= sx
+      c.y *= sy
+      c.width *= sx
+      c.height *= sy
+      if (c.type === 'text') {
+        c.fontSize = clamp(Math.round(c.fontSize * Math.min(sx, sy)), 4, 400)
+        c.height = c.fontSize
+      }
+      if (c.type === 'group') {
+        scaleGroupChildren(cid, sx, sy)
+      }
+    }
+  }
+
   function applyTransformFromInputs(): void {
     if (selected.size === 0) return
     if (selected.size === 1) {
-      const it = getItemById([...selected][0]!)!
+      const it = getNode([...selected][0]!)!
       const px = readNum(inpX)
       const py = readNum(inpY)
       if (px !== null) it.x = px
@@ -1314,6 +1394,26 @@ export function mount(root: HTMLElement): void {
         if (pfs !== null) {
           it.fontSize = clamp(pfs, 4, 400)
           it.height = it.fontSize
+        }
+      } else if (it.type === 'group') {
+        const pw = readNum(inpW)
+        const ph = readNum(inpH)
+        const ow = it.width
+        const oh = it.height
+        if (pw !== null && ph !== null) {
+          const nw = Math.max(1, pw)
+          const nh = Math.max(1, ph)
+          scaleGroupChildren(it.id, nw / ow, nh / oh)
+          it.width = nw
+          it.height = nh
+        } else if (pw !== null) {
+          const nw = Math.max(1, pw)
+          scaleGroupChildren(it.id, nw / ow, 1)
+          it.width = nw
+        } else if (ph !== null) {
+          const nh = Math.max(1, ph)
+          scaleGroupChildren(it.id, 1, nh / oh)
+          it.height = nh
         }
       } else {
         const pw = readNum(inpW)
@@ -1326,14 +1426,28 @@ export function mount(root: HTMLElement): void {
       const ph = readNum(inpH)
       if (pw !== null) {
         for (const id of selected) {
-          const it = getItemById(id)
-          if (it) it.width = Math.max(1, pw)
+          const it = getNode(id)
+          if (it && it.type === 'group') {
+            const ow = it.width
+            const nw = Math.max(1, pw)
+            scaleGroupChildren(it.id, nw / ow, 1)
+            it.width = nw
+          } else if (it && it.type !== 'text') {
+            it.width = Math.max(1, pw)
+          }
         }
       }
       if (ph !== null) {
         for (const id of selected) {
-          const it = getItemById(id)
-          if (it) it.height = Math.max(1, ph)
+          const it = getNode(id)
+          if (it && it.type === 'group') {
+            const oh = it.height
+            const nh = Math.max(1, ph)
+            scaleGroupChildren(it.id, 1, nh / oh)
+            it.height = nh
+          } else if (it && it.type !== 'text') {
+            it.height = Math.max(1, ph)
+          }
         }
       }
     }
@@ -1481,13 +1595,303 @@ export function mount(root: HTMLElement): void {
     for (const id of ids) {
       const n = nodes.get(id)
       if (!n) continue
+      const subtree = collectSubtreeIds(nodes, id)
       removeChildRef(n.parentId, id)
-      for (const x of collectSubtreeIds(nodes, id)) {
+      for (const x of subtree) {
         nodes.delete(x)
         delete layerNames[x]
         selected.delete(x)
       }
     }
+  }
+
+  function groupSelection(): void {
+    const ids = [...selected]
+    if (ids.length < 2) return
+    const parentId = nodes.get(ids[0]!)?.parentId ?? null
+    if (!ids.every((id) => (nodes.get(id)?.parentId ?? null) === parentId)) {
+      alert('Select layers that share the same parent to group.')
+      return
+    }
+    const u = unionBoundsWorld(ids, nodes, definitions)
+    if (!u) return
+    const pwo = parentId ? parentWorldOrigin(ids[0]!) : { x: 0, y: 0 }
+    const gx = u.left - pwo.x
+    const gy = u.top - pwo.y
+    const gw = u.right - u.left
+    const gh = u.bottom - u.top
+    const list = [...siblingListForParent(parentId)]
+    const insertAt = Math.min(...ids.map((id) => list.indexOf(id)).filter((i) => i >= 0))
+    for (const id of ids) removeChildRef(parentId, id)
+    const gid = newId()
+    const g: SceneGroup = {
+      id: gid,
+      parentId,
+      type: 'group',
+      x: gx,
+      y: gy,
+      width: gw,
+      height: gh,
+      childIds: [],
+    }
+    nodes.set(gid, g)
+    for (const id of ids) {
+      const c = nodes.get(id)
+      if (!c) continue
+      c.parentId = gid
+      c.x -= gx
+      c.y -= gy
+      g.childIds.push(id)
+    }
+    insertChildRef(parentId, gid, insertAt)
+    selected = new Set([gid])
+    commit()
+  }
+
+  function ungroupSelection(): void {
+    const id = [...selected][0]
+    if (!id) return
+    const g = nodes.get(id)
+    if (g?.type !== 'group') return
+    const parentId = g.parentId
+    const list = [...siblingListForParent(parentId)]
+    const insertIdx = list.indexOf(id)
+    removeChildRef(parentId, id)
+    const gx = g.x
+    const gy = g.y
+    const kids = [...g.childIds]
+    for (const cid of kids) {
+      const c = nodes.get(cid)
+      if (!c) continue
+      c.parentId = parentId
+      c.x += gx
+      c.y += gy
+    }
+    if (parentId === null) {
+      rootIds.splice(insertIdx, 1)
+      rootIds.splice(insertIdx, 0, ...kids)
+    } else {
+      const p = nodes.get(parentId)
+      if (p?.type === 'group') {
+        const arr = [...p.childIds]
+        const i = arr.indexOf(id)
+        if (i >= 0) {
+          arr.splice(i, 1, ...kids)
+          p.childIds = arr
+        }
+      }
+    }
+    nodes.delete(id)
+    delete layerNames[id]
+    selected = new Set(kids)
+    commit()
+  }
+
+  function cloneSubtreeAsComponentDefinition(rootId: string): ComponentDefinition | null {
+    const ids = [...collectSubtreeIds(nodes, rootId)]
+    const idMap = new Map<string, string>()
+    for (const oldId of ids) {
+      idMap.set(oldId, newId())
+    }
+    const newNodes: Record<string, DefNode> = {}
+    for (const oldId of ids) {
+      const raw = nodes.get(oldId)
+      if (!raw || raw.type === 'instance') continue
+      const nid = idMap.get(oldId)!
+      const copy = JSON.parse(JSON.stringify(raw)) as DefNode
+      copy.id = nid
+      copy.parentId = oldId === rootId ? null : idMap.get(raw.parentId!)!
+      if (copy.type === 'group' && raw.type === 'group') {
+        copy.childIds = raw.childIds.map((c: string) => idMap.get(c)!)
+      }
+      newNodes[nid] = copy
+    }
+    const newRoot = idMap.get(rootId)!
+    const def: ComponentDefinition = {
+      id: newId(),
+      name: `Component ${definitions.size + 1}`,
+      rootId: newRoot,
+      intrinsicW: 100,
+      intrinsicH: 100,
+      nodes: newNodes,
+    }
+    normalizeDefinitionOrigin(def)
+    return def
+  }
+
+  function createComponentFromSelection(): void {
+    const tops = [...selected].filter(
+      (id) => ![...selected].some((o) => o !== id && isDescendant(nodes, o, id)),
+    )
+    if (tops.length === 0) return
+    let rootId: string
+    if (tops.length === 1) {
+      rootId = tops[0]!
+    } else {
+      const parentId = nodes.get(tops[0]!)?.parentId ?? null
+      if (!tops.every((id) => (nodes.get(id)?.parentId ?? null) === parentId)) {
+        alert('Select siblings with the same parent, or Group them first.')
+        return
+      }
+      const u = unionBoundsWorld(tops, nodes, definitions)
+      if (!u) return
+      const pwo = parentId ? parentWorldOrigin(tops[0]!) : { x: 0, y: 0 }
+      const gx = u.left - pwo.x
+      const gy = u.top - pwo.y
+      const gw = u.right - u.left
+      const gh = u.bottom - u.top
+      const list = [...siblingListForParent(parentId)]
+      const insertAt = Math.min(...tops.map((id) => list.indexOf(id)).filter((i) => i >= 0))
+      for (const id of tops) removeChildRef(parentId, id)
+      const gid = newId()
+      const g: SceneGroup = {
+        id: gid,
+        parentId,
+        type: 'group',
+        x: gx,
+        y: gy,
+        width: gw,
+        height: gh,
+        childIds: [],
+      }
+      nodes.set(gid, g)
+      for (const id of tops) {
+        const c = nodes.get(id)
+        if (!c) continue
+        c.parentId = gid
+        c.x -= gx
+        c.y -= gy
+        g.childIds.push(id)
+      }
+      insertChildRef(parentId, gid, insertAt)
+      rootId = gid
+      selected = new Set([gid])
+    }
+    const n = getNode(rootId)
+    if (!n || n.type === 'instance') return
+    const wf = worldFrame(nodes, definitions, rootId)
+    if (!wf) return
+    const def = cloneSubtreeAsComponentDefinition(rootId)
+    if (!def) return
+    const parentId = n.parentId
+    const list = [...siblingListForParent(parentId)]
+    const insertIdx = list.indexOf(rootId)
+    const pwo = parentId ? parentWorldOrigin(rootId) : { x: 0, y: 0 }
+    const ix = wf.x - pwo.x
+    const iy = wf.y - pwo.y
+    removeChildRef(parentId, rootId)
+    for (const x of collectSubtreeIds(nodes, rootId)) {
+      nodes.delete(x)
+      delete layerNames[x]
+    }
+    definitions.set(def.id, def)
+    const instId = newId()
+    nodes.set(instId, {
+      id: instId,
+      parentId,
+      type: 'instance',
+      componentId: def.id,
+      x: ix,
+      y: iy,
+      width: wf.width,
+      height: wf.height,
+    })
+    insertChildRef(parentId, instId, insertIdx >= 0 ? insertIdx : rootIds.length)
+    selected = new Set([instId])
+    commit()
+  }
+
+  function scaleSceneSubtree(nodeId: string, sx: number, sy: number): void {
+    const n = nodes.get(nodeId)
+    if (!n) return
+    n.x *= sx
+    n.y *= sy
+    n.width *= sx
+    n.height *= sy
+    if (n.type === 'text') {
+      n.fontSize = clamp(Math.round(n.fontSize * Math.min(sx, sy)), 4, 400)
+      n.height = n.fontSize
+    }
+    if (n.type === 'group') {
+      for (const cid of n.childIds) {
+        scaleSceneSubtree(cid, sx, sy)
+      }
+    }
+  }
+
+  function detachInstance(): void {
+    const id = [...selected][0]
+    if (!id) return
+    const inst = getNode(id)
+    if (inst?.type !== 'instance') return
+    const def = definitions.get(inst.componentId)
+    if (!def) return
+    const parentId = inst.parentId
+    const list = [...siblingListForParent(parentId)]
+    const insertIdx = list.indexOf(id)
+    const sx = inst.width / Math.max(1e-6, def.intrinsicW)
+    const sy = inst.height / Math.max(1e-6, def.intrinsicH)
+    const idMap = new Map<string, string>()
+    for (const k of Object.keys(def.nodes)) {
+      idMap.set(k, newId())
+    }
+    const cloneDefNode = (oldId: string, newParent: string | null): void => {
+      const dn = def.nodes[oldId]
+      if (!dn) return
+      const nid = idMap.get(oldId)!
+      const copy = JSON.parse(JSON.stringify(dn)) as SceneNode
+      copy.id = nid
+      copy.parentId = newParent
+      if (copy.type === 'group' && dn.type === 'group') {
+        copy.childIds = dn.childIds.map((c: string) => idMap.get(c)!)
+      }
+      nodes.set(nid, copy)
+      if (dn.type === 'group') {
+        for (const c of dn.childIds) {
+          cloneDefNode(c, nid)
+        }
+      }
+    }
+    cloneDefNode(def.rootId, parentId)
+    const newRoot = idMap.get(def.rootId)!
+    removeChildRef(parentId, id)
+    nodes.delete(id)
+    const nr = getNode(newRoot)!
+    nr.x = inst.x
+    nr.y = inst.y
+    if (nr.type === 'group') {
+      nr.width *= sx
+      nr.height *= sy
+      for (const cid of nr.childIds) {
+        scaleSceneSubtree(cid, sx, sy)
+      }
+    } else {
+      scaleSceneSubtree(newRoot, sx, sy)
+    }
+    insertChildRef(parentId, newRoot, insertIdx >= 0 ? insertIdx : rootIds.length)
+    selected = new Set([newRoot])
+    commit()
+  }
+
+  function insertComponentInstance(compId: string): void {
+    const def = definitions.get(compId)
+    if (!def) return
+    const w = Math.min(def.intrinsicW, VIEW_W * 0.5)
+    const h = Math.min(def.intrinsicH, VIEW_H * 0.5)
+    const nid = newId()
+    nodes.set(nid, {
+      id: nid,
+      parentId: null,
+      type: 'instance',
+      componentId: compId,
+      x: (VIEW_W - w) / 2,
+      y: (VIEW_H - h) / 2,
+      width: w,
+      height: h,
+    })
+    rootIds.push(nid)
+    selected = new Set([nid])
+    commit()
   }
 
   function defSubtreeBounds(
@@ -1534,8 +1938,7 @@ export function mount(root: HTMLElement): void {
       root.x += dx
       root.y += dy
     }
-    def.intrinsicW = Math.max(MIN_ITEM_SIZE, b.maxX - b.minX)
-    def.intrinsicH = Math.max(MIN_ITEM_SIZE, b.maxY - b.minY)
+    recomputeIntrinsic(def)
   }
 
   function recomputeIntrinsic(def: ComponentDefinition): void {
@@ -1547,6 +1950,44 @@ export function mount(root: HTMLElement): void {
     }
     def.intrinsicW = Math.max(MIN_ITEM_SIZE, b.maxX - b.minX)
     def.intrinsicH = Math.max(MIN_ITEM_SIZE, b.maxY - b.minY)
+  }
+
+  function worldNodeOrigin(id: string): { x: number; y: number } {
+    let ox = 0
+    let oy = 0
+    let cur: string | null = id
+    const chain: SceneNode[] = []
+    while (cur) {
+      const node = nodes.get(cur)
+      if (!node) break
+      chain.unshift(node)
+      cur = node.parentId
+    }
+    for (const node of chain) {
+      ox += node.x
+      oy += node.y
+    }
+    return { x: ox, y: oy }
+  }
+
+  function serializeSubtreeForExport(id: string, ind: string): string {
+    const n = nodes.get(id)
+    if (!n) return ''
+    if (n.type === 'group') {
+      const inner = n.childIds
+        .map((cid) => serializeSceneSubtreeSvg(nodes, definitions, cid, `${ind}  `))
+        .join('\n')
+      return `${ind}<g>\n${inner}\n${ind}</g>`
+    }
+    if (n.type === 'instance') {
+      const def = definitions.get(n.componentId)
+      if (!def) return ''
+      const sx = n.width / Math.max(1e-6, def.intrinsicW)
+      const sy = n.height / Math.max(1e-6, def.intrinsicH)
+      const inner = serializeDefSubtreeSvg(def, def.rootId, `${ind}  `)
+      return `${ind}<g transform="scale(${sx} ${sy})">\n${inner}\n${ind}</g>`
+    }
+    return `${ind}${buildSvgFragmentLeafLocal(n)}`
   }
 
   function hitTestWorld(wx: number, wy: number): string | null {
@@ -1684,51 +2125,35 @@ export function mount(root: HTMLElement): void {
     return p?.type === 'group' ? p.childIds : []
   }
 
-  function indexInParent(childId: string): { parentId: string | null; index: number } | null {
-    const n = nodes.get(childId)
-    if (!n) return null
-    const list = siblingListForParent(n.parentId)
-    const idx = list.indexOf(childId)
-    if (idx < 0) return null
-    return { parentId: n.parentId, index: idx }
-  }
-
   function moveLayerNode(
     dragId: string,
     targetId: string,
     kind: 'before' | 'into',
   ): void {
     if (dragId === targetId) return
-    if (kind === 'into' && isDescendant(nodes, dragId, targetId)) return
-    const info = indexInParent(dragId)
-    if (!info) return
-    removeChildRef(info.parentId, dragId)
+    const d = nodes.get(dragId)
+    if (!d) return
     if (kind === 'into') {
-      const t = nodes.get(targetId)
-      if (t?.type !== 'group') return
-      const n = nodes.get(dragId)
-      if (!n) return
-      n.parentId = targetId
-      t.childIds.push(dragId)
+      if (isDescendant(nodes, dragId, targetId)) return
+      const g = nodes.get(targetId)
+      if (g?.type !== 'group') return
+      removeChildRef(d.parentId, dragId)
+      d.parentId = targetId
+      g.childIds.push(dragId)
       return
     }
-    const tInfo = indexInParent(targetId)
-    if (!tInfo) return
-    const n = nodes.get(dragId)
-    if (!n) return
-    let insertIdx = tInfo.index
-    if (tInfo.parentId === info.parentId && info.index < tInfo.index) insertIdx -= 1
-    n.parentId = tInfo.parentId
-    if (tInfo.parentId === null) {
-      rootIds.splice(insertIdx, 0, dragId)
-    } else {
-      const p = nodes.get(tInfo.parentId)
-      if (p?.type === 'group') {
-        const next = [...p.childIds]
-        next.splice(insertIdx, 0, dragId)
-        p.childIds = next
-      }
-    }
+    if (isDescendant(nodes, dragId, targetId)) return
+    const t = nodes.get(targetId)
+    if (!t) return
+    const parentId = t.parentId
+    const listBefore = [...siblingListForParent(parentId)]
+    const ti = listBefore.indexOf(targetId)
+    if (ti < 0) return
+    removeChildRef(d.parentId, dragId)
+    const listAfter = siblingListForParent(parentId)
+    const insertAt = listAfter.indexOf(targetId)
+    if (insertAt < 0) return
+    insertChildRef(parentId, dragId, insertAt)
   }
 
   function renderLayerBranch(host: HTMLUListElement, parentId: string | null, depth: number): void {
@@ -1888,18 +2313,13 @@ export function mount(root: HTMLElement): void {
     layerList.replaceChildren()
     renderLayerBranch(layerList, null, 0)
 
-    layerList.addEventListener(
-      'dragover',
-      (e) => {
-        if (!layerDragId) return
-        e.preventDefault()
-      },
-      { passive: false },
-    )
-
     if (preserveId) {
+      const esc =
+        typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+          ? CSS.escape(preserveId)
+          : preserveId.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
       const inp = layerList.querySelector<HTMLInputElement>(
-        `li.pop-layer[data-id="${CSS.escape(preserveId)}"] .pop-layer-name`,
+        `li.pop-layer[data-id="${esc}"] .pop-layer-name`,
       )
       if (inp) {
         inp.focus()
@@ -1917,70 +2337,118 @@ export function mount(root: HTMLElement): void {
     updateCompPickList()
   }
 
-  function renderItems(): void {
-    itemsG.replaceChildren()
-    for (const item of items) {
+  function renderDefSubtree(
+    def: ComponentDefinition,
+    id: string,
+    parentG: SVGGElement,
+  ): void {
+    const n = def.nodes[id]
+    if (!n) return
+    if (n.type === 'group') {
+      const gg = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+      gg.setAttribute('transform', `translate(${n.x} ${n.y})`)
+      for (const cid of n.childIds) {
+        renderDefSubtree(def, cid, gg)
+      }
+      parentG.appendChild(gg)
+      return
+    }
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    g.setAttribute('transform', `translate(${n.x} ${n.y})`)
+    const frag = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    frag.innerHTML = buildSvgFragmentLeafLocal(n)
+    while (frag.firstChild) g.appendChild(frag.firstChild)
+    parentG.appendChild(g)
+  }
+
+  function renderSceneNode(id: string, parentG: SVGGElement): void {
+    const item = nodes.get(id)
+    if (!item) return
+    if (item.type === 'group') {
       const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
       g.classList.add('pop-item')
       g.dataset.id = item.id
-      if (item.type === 'rect') {
-        const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
-        r.setAttribute('x', String(item.x))
-        r.setAttribute('y', String(item.y))
-        r.setAttribute('width', String(item.width))
-        r.setAttribute('height', String(item.height))
-        r.setAttribute('fill', item.fill)
-        r.setAttribute('stroke', item.stroke)
-        r.setAttribute('stroke-width', String(item.strokeWidth))
-        g.appendChild(r)
-      } else if (item.type === 'ellipse') {
-        const el = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse')
-        el.setAttribute('cx', String(item.x + item.width / 2))
-        el.setAttribute('cy', String(item.y + item.height / 2))
-        el.setAttribute('rx', String(item.width / 2))
-        el.setAttribute('ry', String(item.height / 2))
-        el.setAttribute('fill', item.fill)
-        el.setAttribute('stroke', item.stroke)
-        el.setAttribute('stroke-width', String(item.strokeWidth))
-        g.appendChild(el)
-      } else if (item.type === 'text') {
-        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text')
-        t.setAttribute('x', String(item.x))
-        t.setAttribute('y', String(item.y + item.fontSize))
-        t.setAttribute('font-size', String(item.fontSize))
-        t.setAttribute('font-family', 'system-ui, sans-serif')
-        t.setAttribute('fill', item.fill)
-        t.textContent = item.content
-        g.appendChild(t)
-      } else {
-        const im = document.createElementNS('http://www.w3.org/2000/svg', 'image')
-        im.setAttribute('href', item.href)
-        im.setAttribute('x', String(item.x))
-        im.setAttribute('y', String(item.y))
-        im.setAttribute('width', String(item.width))
-        im.setAttribute('height', String(item.height))
-        im.setAttribute('preserveAspectRatio', 'none')
-        g.appendChild(im)
+      g.setAttribute('transform', `translate(${item.x} ${item.y})`)
+      for (const cid of item.childIds) {
+        renderSceneNode(cid, g)
       }
-      itemsG.appendChild(g)
+      parentG.appendChild(g)
+      return
+    }
+    if (item.type === 'instance') {
+      const def = definitions.get(item.componentId)
+      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+      g.classList.add('pop-item')
+      g.dataset.id = item.id
+      const sx = item.width / Math.max(1e-6, def?.intrinsicW ?? 1)
+      const sy = item.height / Math.max(1e-6, def?.intrinsicH ?? 1)
+      g.setAttribute('transform', `translate(${item.x} ${item.y}) scale(${sx} ${sy})`)
+      if (def) {
+        renderDefSubtree(def, def.rootId, g)
+      }
+      parentG.appendChild(g)
+      return
+    }
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    g.classList.add('pop-item')
+    g.dataset.id = item.id
+    g.setAttribute('transform', `translate(${item.x} ${item.y})`)
+    const frag = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    frag.innerHTML = buildSvgFragmentLeafLocal(item)
+    while (frag.firstChild) g.appendChild(frag.firstChild)
+    parentG.appendChild(g)
+  }
+
+  function renderItems(): void {
+    itemsG.replaceChildren()
+    for (const rid of rootIds) {
+      renderSceneNode(rid, itemsG)
     }
     updateSelectionUi()
   }
 
   const HANDLE_HALF = 5
 
+  function parentWorldOrigin(nodeId: string): { x: number; y: number } {
+    const n = nodes.get(nodeId)
+    if (!n) return { x: 0, y: 0 }
+    let ox = 0
+    let oy = 0
+    let cur: string | null = n.parentId
+    const chain: SceneNode[] = []
+    while (cur) {
+      const node = nodes.get(cur)
+      if (!node) break
+      chain.unshift(node)
+      cur = node.parentId
+    }
+    for (const node of chain) {
+      ox += node.x
+      oy += node.y
+    }
+    return { x: ox, y: oy }
+  }
+
+  function pointerToLocalParent(px: number, py: number, nodeId: string): { x: number; y: number } {
+    const o = parentWorldOrigin(nodeId)
+    return { x: px - o.x, y: py - o.y }
+  }
+
   function renderHandles(): void {
     handlesG.replaceChildren()
     if (tool !== 'select' || selected.size !== 1) return
     const id = [...selected][0]!
-    const it = getItemById(id)
+    const it = getNode(id)
     if (!it) return
 
+    const wf = worldFrame(nodes, definitions, id)
+    if (!wf) return
+
     const outline = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
-    outline.setAttribute('x', String(it.x))
-    outline.setAttribute('y', String(it.y))
-    outline.setAttribute('width', String(it.width))
-    outline.setAttribute('height', String(it.height))
+    outline.setAttribute('x', String(wf.x))
+    outline.setAttribute('y', String(wf.y))
+    outline.setAttribute('width', String(wf.width))
+    outline.setAttribute('height', String(wf.height))
     outline.setAttribute('fill', 'none')
     outline.setAttribute('stroke', '#a5b4fc')
     outline.setAttribute('stroke-width', '1')
@@ -2005,7 +2473,7 @@ export function mount(root: HTMLElement): void {
       handlesG.appendChild(hr)
     }
 
-    const { x, y, width: w, height: h } = it
+    const { x, y, width: w, height: h } = wf
     addHandle('nw', x, y)
     addHandle('n', x + w / 2, y)
     addHandle('ne', x + w, y)
@@ -2032,17 +2500,34 @@ export function mount(root: HTMLElement): void {
 
   function hitItemId(ev: PointerEvent): string | null {
     const { x, y } = clientToSvg(ev)
-    for (let i = items.length - 1; i >= 0; i--) {
-      const it = items[i]!
-      if (x >= it.x && x <= it.x + it.width && y >= it.y && y <= it.y + it.height) {
-        return it.id
-      }
-    }
-    return null
+    return hitTestWorld(x, y)
   }
 
   toolButtons.forEach((b) => {
     b.addEventListener('click', () => setTool(b.dataset.tool as Tool))
+  })
+
+  layerList.addEventListener('dragover', (e) => {
+    if (!layerDragId) return
+    e.preventDefault()
+  })
+
+  btnGroup.addEventListener('click', () => groupSelection())
+  btnUngroup.addEventListener('click', () => ungroupSelection())
+  btnCreateComp.addEventListener('click', () => createComponentFromSelection())
+  btnDetach.addEventListener('click', () => detachInstance())
+  btnEditComp.addEventListener('click', () => {
+    const id = [...selected][0]
+    const n = id ? getNode(id) : undefined
+    if (n?.type === 'instance') enterComponentEdit(n.componentId)
+  })
+  btnCompDone.addEventListener('click', () => exitComponentEdit(true))
+  selCompPick.addEventListener('change', () => {
+    btnInsertInst.disabled = definitions.size === 0 || selCompPick.value === ''
+  })
+  btnInsertInst.addEventListener('click', () => {
+    const v = selCompPick.value
+    if (v) insertComponentInstance(v)
   })
 
   syncViewportTransform()
@@ -2080,7 +2565,7 @@ export function mount(root: HTMLElement): void {
     syncChromeFromInputs()
     updateFillSwatch()
     for (const id of selected) {
-      const it = getItemById(id)
+      const it = getNode(id)
       if (!it) continue
       if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text') {
         it.fill = defaultFill
@@ -2093,7 +2578,7 @@ export function mount(root: HTMLElement): void {
     syncChromeFromInputs()
     updateStrokeSwatch()
     for (const id of selected) {
-      const it = getItemById(id)
+      const it = getNode(id)
       if (it && (it.type === 'rect' || it.type === 'ellipse')) {
         it.stroke = defaultStroke
       }
@@ -2104,7 +2589,7 @@ export function mount(root: HTMLElement): void {
   strokeWInput.addEventListener('input', () => {
     syncChromeFromInputs()
     for (const id of selected) {
-      const it = getItemById(id)
+      const it = getNode(id)
       if (it && (it.type === 'rect' || it.type === 'ellipse')) {
         it.strokeWidth = defaultStrokeWidth
       }
@@ -2113,22 +2598,36 @@ export function mount(root: HTMLElement): void {
   })
 
   btnDelete.addEventListener('click', () => {
-    items = items.filter((i) => !selected.has(i.id))
+    deleteNodesSubtrees(selectedDeletionRoots())
     selected.clear()
     commit()
   })
 
   btnExportSel.addEventListener('click', () => {
-    const list = items.filter((i) => selected.has(i.id))
-    if (list.length === 0) {
+    if (selected.size === 0) {
       alert('Select one or more layers first (click on the canvas or list, Shift for multi-select).')
       return
     }
-    downloadSvg(serializeSvg(list, VIEW_W, VIEW_H), 'pop-selection.svg')
+    const tops = [...selected].filter(
+      (id) => ![...selected].some((o) => o !== id && isDescendant(nodes, o, id)),
+    )
+    const parts = tops
+      .map((id) => {
+        const o = worldNodeOrigin(id)
+        const inner = serializeSubtreeForExport(id, '    ')
+        return `  <g transform="translate(${o.x} ${o.y})">\n${inner}\n  </g>`
+      })
+      .join('\n')
+    const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${VIEW_W}" height="${VIEW_H}" viewBox="0 0 ${VIEW_W} ${VIEW_H}">
+${parts}
+</svg>
+`
+    downloadSvg(svg, 'pop-selection.svg')
   })
 
   btnExportAll.addEventListener('click', () => {
-    downloadSvg(serializeSvg(items, VIEW_W, VIEW_H), 'pop-canvas.svg')
+    downloadSvg(serializeSvgFromRoots(rootIds, nodes, definitions, VIEW_W, VIEW_H), 'pop-canvas.svg')
   })
 
   fileInput.addEventListener('change', () => {
@@ -2149,8 +2648,9 @@ export function mount(root: HTMLElement): void {
         const x = (VIEW_W - w) / 2
         const y = (VIEW_H - h) / 2
         const nid = newId()
-        items.push({
+        nodes.set(nid, {
           id: nid,
+          parentId: null,
           type: 'image',
           x,
           y,
@@ -2158,6 +2658,7 @@ export function mount(root: HTMLElement): void {
           height: h,
           href,
         })
+        rootIds.push(nid)
         selected = new Set([nid])
         setTool('select')
         commit()
@@ -2176,8 +2677,8 @@ export function mount(root: HTMLElement): void {
       const iid = handleEl.getAttribute('data-item-id')
       const only = [...selected][0]
       if (hid && iid && only === iid) {
-        const it = getItemById(iid)
-        if (it) {
+        const it = getNode(iid)
+        if (it && it.type !== 'group') {
           ev.preventDefault()
           resizeState.active = true
           resizeState.pointerId = ev.pointerId
@@ -2217,7 +2718,7 @@ export function mount(root: HTMLElement): void {
         dragState.startSvgY = p0.y
         dragState.origins.clear()
         for (const sid of selected) {
-          const it = getItemById(sid)
+          const it = getNode(sid)
           if (it) dragState.origins.set(sid, { x: it.x, y: it.y })
         }
         svg.setPointerCapture(ev.pointerId)
@@ -2238,8 +2739,9 @@ export function mount(root: HTMLElement): void {
       const w = 140
       const h = 90
       const nid = newId()
-      items.push({
+      nodes.set(nid, {
         id: nid,
+        parentId: null,
         type: 'rect',
         x: x - w / 2,
         y: y - h / 2,
@@ -2249,14 +2751,16 @@ export function mount(root: HTMLElement): void {
         stroke: defaultStroke,
         strokeWidth: defaultStrokeWidth,
       })
+      rootIds.push(nid)
       selected = new Set([nid])
       setTool('select')
     } else if (tool === 'ellipse') {
       const w = 120
       const h = 120
       const nid = newId()
-      items.push({
+      nodes.set(nid, {
         id: nid,
+        parentId: null,
         type: 'ellipse',
         x: x - w / 2,
         y: y - h / 2,
@@ -2266,6 +2770,7 @@ export function mount(root: HTMLElement): void {
         stroke: defaultStroke,
         strokeWidth: defaultStrokeWidth,
       })
+      rootIds.push(nid)
       selected = new Set([nid])
       setTool('select')
     } else if (tool === 'text') {
@@ -2273,8 +2778,9 @@ export function mount(root: HTMLElement): void {
       if (content === null) return
       const fontSize = 28
       const nid = newId()
-      items.push({
+      nodes.set(nid, {
         id: nid,
+        parentId: null,
         type: 'text',
         x,
         y: y - fontSize,
@@ -2284,6 +2790,7 @@ export function mount(root: HTMLElement): void {
         fontSize,
         fill: defaultFill,
       })
+      rootIds.push(nid)
       selected = new Set([nid])
       setTool('select')
     }
@@ -2293,11 +2800,12 @@ export function mount(root: HTMLElement): void {
 
   window.addEventListener('pointermove', (ev) => {
     if (resizeState.active && ev.pointerId === resizeState.pointerId) {
-      const it = resizeState.itemId ? getItemById(resizeState.itemId) : undefined
+      const it = resizeState.itemId ? getNode(resizeState.itemId) : undefined
       const hid = resizeState.handle
-      if (!it || !hid) return
+      if (!it || !hid || it.type === 'group') return
       const p = clientToSvg(ev)
-      const out = applyResizeHandle(hid, p.x, p.y, resizeState.start)
+      const pl = pointerToLocalParent(p.x, p.y, resizeState.itemId!)
+      const out = applyResizeHandle(hid, pl.x, pl.y, resizeState.start)
       it.x = out.x
       it.y = out.y
       it.width = out.width
@@ -2320,7 +2828,7 @@ export function mount(root: HTMLElement): void {
     const dy = p.y - dragState.startSvgY
     for (const sid of selected) {
       const origin = dragState.origins.get(sid)
-      const it = getItemById(sid)
+      const it = getNode(sid)
       if (!origin || !it) continue
       it.x = origin.x + dx
       it.y = origin.y + dy
@@ -2331,15 +2839,15 @@ export function mount(root: HTMLElement): void {
     lastSnapHint = null
 
     if (symmetryGuidesOn && selected.size > 0) {
-      const u = unionBounds(selected, getItemById)
+      const u = unionBoundsWorld(selected, nodes, definitions)
       if (u) {
-        const tx = collectSnapTargetsX(selected, items)
-        const ty = collectSnapTargetsY(selected, items)
+        const tx = collectSnapTargetsX(selected, nodes, definitions)
+        const ty = collectSnapTargetsY(selected, nodes, definitions)
         const sx = snapAxis('x', u.left, u.cx, u.right, tx, SNAP_PX)
         const sy = snapAxis('y', u.top, u.cy, u.bottom, ty, SNAP_PX)
         if (sx.delta !== 0 || sy.delta !== 0) {
           for (const sid of selected) {
-            const it = getItemById(sid)
+            const it = getNode(sid)
             if (it) {
               it.x += sx.delta
               it.y += sy.delta
@@ -2424,12 +2932,16 @@ export function mount(root: HTMLElement): void {
   })
 
   window.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && editingComponentId) {
+      exitComponentEdit(false)
+      return
+    }
     if (ev.key === 'Delete' || ev.key === 'Backspace') {
       const t = ev.target as HTMLElement
       if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
       if (selected.size === 0) return
       ev.preventDefault()
-      items = items.filter((i) => !selected.has(i.id))
+      deleteNodesSubtrees(selectedDeletionRoots())
       selected.clear()
       commit()
     }
