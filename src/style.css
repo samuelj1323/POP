@@ -11,8 +11,10 @@
   --accent-dim: rgba(196, 181, 253, 0.16);
   --accent-glow: rgba(167, 139, 250, 0.45);
   --danger: #fb7185;
-  --canvas-cell: #100c18;
-  --canvas-line: #2d2440;
+  /* Match page base so the canvas is not a separate darker/lighter slab */
+  --canvas-cell: var(--bg);
+  /* Visible on --bg (was #2d2440, too low-contrast vs #0a0612) */
+  --canvas-line: rgba(186, 168, 228, 0.32);
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --display: 'Syne', system-ui, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
@@ -30,8 +32,13 @@
   box-sizing: border-box;
 }
 
+html {
+  height: 100%;
+}
+
 body {
   margin: 0;
+  height: 100%;
   min-height: 100svh;
   background-color: var(--bg);
   background-image:
@@ -41,16 +48,25 @@ body {
 }
 
 #app {
+  height: 100%;
   min-height: 100svh;
+  display: flex;
+  flex-direction: column;
 }
 
 .pop-app {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 1.25rem 1.25rem 2rem;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  max-width: none;
+  margin: 0;
+  padding: 0 0 0.75rem;
 }
 
 .pop-header {
+  flex-shrink: 0;
+  padding: 1.25rem 1.25rem 0;
   margin-bottom: 1rem;
 }
 
@@ -83,6 +99,8 @@ body {
 }
 
 .pop-toolbar-wrap {
+  flex-shrink: 0;
+  padding: 0 1.25rem;
   margin-bottom: 1rem;
 }
 
@@ -520,24 +538,34 @@ body {
 }
 
 .pop-main {
+  position: relative;
+  flex: 1;
+  min-height: 0;
   display: grid;
-  grid-template-columns: minmax(220px, 260px) 1fr;
-  gap: 1rem;
-  align-items: start;
-}
-
-@media (max-width: 800px) {
-  .pop-main {
-    grid-template-columns: 1fr;
-  }
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+  align-items: stretch;
 }
 
 .pop-layers {
-  background: var(--surface);
+  grid-column: 1;
+  grid-row: 1;
+  z-index: 100;
+  align-self: start;
+  justify-self: start;
+  width: min(260px, calc(100vw - 1.5rem));
+  max-height: min(calc(100% - 1.5rem), calc(100svh - 12rem));
+  margin: 0.75rem;
+  overflow: auto;
+  background: rgba(21, 16, 34, 0.92);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 0.75rem 1rem;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.03) inset,
+    0 12px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .pop-layers h2 {
@@ -866,28 +894,89 @@ body {
 }
 
 .pop-canvas-wrap {
+  position: relative;
+  grid-column: 1;
+  grid-row: 1;
+  z-index: 1;
+  min-height: 0;
+  height: 100%;
+  align-self: stretch;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 12px 12px 0 0;
+  border-left: none;
+  border-right: none;
   overflow: auto;
-  /* Solid fill only: the artboard grid lives in SVG (#pop-grid). A CSS grid here used
-     fixed 16px cells while the SVG pattern scales with display size, so two misaligned
-     grids appeared (different cell sizes and phase). */
-  background-color: var(--canvas-cell);
-  padding: 0.75rem;
+  /* Single grid: lines synced from JS to pan/zoom/letterbox (--pop-grid-*). Never plain fill only. */
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--canvas-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--canvas-line) 1px, transparent 1px);
+  background-size: var(--pop-grid-pitch, 16px) var(--pop-grid-pitch, 16px);
+  background-position: var(--pop-grid-ox, 0px) var(--pop-grid-oy, 0px);
+  padding: 0;
   display: flex;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+.pop-zoom-dock {
+  position: absolute;
+  right: 0.65rem;
+  bottom: 0.65rem;
+  z-index: 90;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  min-height: min(70vh, 720px);
+  justify-content: flex-end;
+  gap: 0.35rem;
+  max-width: calc(100% - 1rem);
+  padding: 0.45rem 0.55rem;
+  background: rgba(21, 16, 34, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.pop-zoom-dock .pop-zoom-btn {
+  min-width: 2.1rem;
+}
+
+.pop-zoom-dock-readout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 3.1rem;
+  min-height: 2.1rem;
+  padding: 0 0.35rem;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.pop-zoom-dock-fit,
+.pop-zoom-dock-reset {
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.35rem 0.55rem;
 }
 
 .pop-canvas {
   display: block;
-  max-width: 100%;
-  height: auto;
-  border-radius: 6px;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  max-width: none;
+  border-radius: 0;
   cursor: default;
   touch-action: none;
-  flex-shrink: 0;
   background: transparent;
 }
 

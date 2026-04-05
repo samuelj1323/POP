@@ -13,6 +13,10 @@
 
 <style>
   .pop-app-host {
-    min-height: 100vh;
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
   }
 </style>

@@ -1,5 +1,6 @@
 import { VIEW_H, VIEW_W } from './constants.ts'
 import { newId } from './id.ts'
+import { collectSubtreeIds, unionBoundsWorld } from './layout-geometry.ts'
 import type { ComponentDefinition, SceneNode } from './scene-types.ts'
 import type { PersistedStateV2 } from './persistence.ts'
 import { recordToDefs, recordToNodes } from './persistence.ts'
@@ -67,6 +68,32 @@ export function computeWorldBounds(
   for (const f of frames) {
     maxX = Math.max(maxX, f.x + f.width)
     maxY = Math.max(maxY, f.y + f.height)
+  }
+  return { worldW: maxX, worldH: maxY }
+}
+
+/** World size for the canvas: union of frame rectangles and all layer bounds (content can extend past frames). */
+export function computeWorldBoundsWithContent(
+  frames: PopFrame[],
+  nodes: Map<string, SceneNode>,
+  definitions: Map<string, ComponentDefinition>,
+  minW = VIEW_W,
+  minH = VIEW_H,
+): { worldW: number; worldH: number } {
+  if (frames.length === 0) return { worldW: minW, worldH: minH }
+  let maxX = minW
+  let maxY = minH
+  for (const f of frames) {
+    maxX = Math.max(maxX, f.x + f.width)
+    maxY = Math.max(maxY, f.y + f.height)
+    for (const rid of f.rootIds) {
+      const ids = collectSubtreeIds(nodes, rid)
+      const u = unionBoundsWorld(ids, nodes, definitions)
+      if (u) {
+        maxX = Math.max(maxX, u.right)
+        maxY = Math.max(maxY, u.bottom)
+      }
+    }
   }
   return { worldW: maxX, worldH: maxY }
 }

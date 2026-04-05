@@ -3,6 +3,7 @@ import {
   MAX_VIEW_SCALE,
   MIN_ITEM_SIZE,
   MIN_VIEW_SCALE,
+  GRID_PATTERN_WORLD,
   SNAP_PX,
   VIEW_H,
   VIEW_W,
@@ -19,7 +20,7 @@ import {
 import type { ResizeHandleId } from './studio/layout-geometry.ts'
 import { clamp } from './studio/math.ts'
 import {
-  computeWorldBounds,
+  computeWorldBoundsWithContent,
   createDefaultFrame,
   documentToV3Json,
   loadDocumentV3,
@@ -62,6 +63,30 @@ import {
 } from './studio/svg-export.ts'
 import { downloadHtml, exportFrameToHtml } from './studio/html-export.ts'
 
+const POP_CLIPBOARD_VERSION = 1 as const
+const PASTE_OFFSET_WORLD = 10
+
+type PopClipboardPayload = {
+  popClipboard: typeof POP_CLIPBOARD_VERSION
+  roots: string[]
+  nodes: Record<string, SceneNode>
+  layerNames?: Record<string, string>
+}
+
+function parsePopClipboard(raw: string): PopClipboardPayload | null {
+  try {
+    const o = JSON.parse(raw) as unknown
+    if (!o || typeof o !== 'object') return null
+    const p = o as Record<string, unknown>
+    if (p.popClipboard !== POP_CLIPBOARD_VERSION) return null
+    if (!Array.isArray(p.roots) || !p.roots.every((x): x is string => typeof x === 'string')) return null
+    if (!p.nodes || typeof p.nodes !== 'object') return null
+    return p as PopClipboardPayload
+  } catch {
+    return null
+  }
+}
+
 export function mount(root: HTMLElement): void {
   let frames: PopFrame[] = [createDefaultFrame()]
   let activeFrameId = frames[0]!.id
@@ -95,9 +120,21 @@ export function mount(root: HTMLElement): void {
   }
 
   function recomputeWorldSize(): void {
-    const b = computeWorldBounds(frames, VIEW_W, VIEW_H)
-    worldW = b.worldW
-    worldH = b.worldH
+    const b = computeWorldBoundsWithContent(frames, nodes, definitions, VIEW_W, VIEW_H)
+    let maxX = b.worldW
+    let maxY = b.worldH
+    if (componentEditRoots) {
+      for (const rid of componentEditRoots) {
+        const ids = collectSubtreeIds(nodes, rid)
+        const u = unionBoundsWorld(ids, nodes, definitions)
+        if (u) {
+          maxX = Math.max(maxX, u.right)
+          maxY = Math.max(maxY, u.bottom)
+        }
+      }
+    }
+    worldW = maxX
+    worldH = maxY
   }
   /** Custom layer names by item id; when missing, UI falls back to `itemLabel`. */
   let layerNames: Record<string, string> = {}
@@ -198,12 +235,15 @@ export function mount(root: HTMLElement): void {
                   <span class="pop-tb-grid-sub">Zoom and pan</span>
                 </div>
                 <div class="pop-tb-dd-panel" id="pop-tb-view-panel" aria-labelledby="pop-tb-view-h">
-                  <p class="pop-tb-dd-desc">Zoom the canvas; reset returns to 100% and centered pan.</p>
+                  <p class="pop-tb-dd-desc">⌘+scroll pans; Ctrl+scroll or pinch zooms. Reset returns to 100% and centered pan.</p>
                   <div class="pop-tb-grid pop-tb-grid-view" role="group" aria-label="Canvas zoom">
                     <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
                     <span class="pop-zoom-pct pop-tb-zoom-readout" id="pop-zoom-pct" aria-live="polite">100%</span>
                     <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
-                    <button type="button" class="pop-btn pop-tb-span2" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset view</button>
+                  </div>
+                  <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Zoom presets">
+                    <button type="button" class="pop-btn" id="pop-zoom-fit" title="Fit entire canvas in view">Fit</button>
+                    <button type="button" class="pop-btn" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset view</button>
                   </div>
                 </div>
               </section>
@@ -275,6 +315,14 @@ export function mount(root: HTMLElement): void {
                     <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-ungroup" disabled>
                       <span class="pop-tb-grid-title">Ungroup</span>
                       <span class="pop-tb-grid-sub">Split one group</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-bring-front" disabled>
+                      <span class="pop-tb-grid-title">Bring to front</span>
+                      <span class="pop-tb-grid-sub">Top of stack</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-send-back" disabled>
+                      <span class="pop-tb-grid-title">Send to back</span>
+                      <span class="pop-tb-grid-sub">Bottom of stack</span>
                     </button>
                     <button type="button" class="pop-btn pop-danger pop-tb-grid-btn pop-tb-span2" id="pop-delete" disabled>
                       <span class="pop-tb-grid-title">Delete</span>
@@ -430,16 +478,10 @@ export function mount(root: HTMLElement): void {
             </div>
           </div>
         </aside>
-        <div class="pop-canvas-wrap" title="Ctrl or ⌘ + scroll (or trackpad pinch) to zoom toward the pointer">
+        <div class="pop-canvas-wrap" title="⌘+scroll to pan · Ctrl+scroll or pinch to zoom toward the pointer">
           <svg class="pop-canvas" id="pop-svg" viewBox="0 0 ${VIEW_W} ${VIEW_H}" width="${VIEW_W}" height="${VIEW_H}" role="img" aria-label="Design canvas">
-            <defs>
-              <pattern id="pop-grid" width="16" height="16" patternUnits="userSpaceOnUse">
-                <rect width="16" height="16" fill="var(--canvas-cell)"/>
-                <path d="M 16 0 L 0 0 0 16" fill="none" stroke="var(--canvas-line)" stroke-width="0.5"/>
-              </pattern>
-            </defs>
-            <rect class="pop-canvas-bg" id="pop-canvas-bg" x="0" y="0" width="${VIEW_W}" height="${VIEW_H}" fill="url(#pop-grid)" pointer-events="none"/>
             <g id="pop-viewport" transform="translate(0 0) scale(1)">
+              <rect class="pop-canvas-bg" id="pop-canvas-bg" x="0" y="0" width="${VIEW_W}" height="${VIEW_H}" fill="transparent" pointer-events="none"/>
               <g id="pop-frame-outlines" pointer-events="none"></g>
               <g id="pop-guides-back" pointer-events="none"></g>
               <g id="pop-items"></g>
@@ -447,6 +489,13 @@ export function mount(root: HTMLElement): void {
               <g id="pop-guides-front" pointer-events="none"></g>
             </g>
           </svg>
+          <div class="pop-zoom-dock" role="toolbar" aria-label="Canvas zoom">
+            <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out-dock" aria-label="Zoom out" title="Zoom out">−</button>
+            <span class="pop-zoom-pct pop-zoom-dock-readout" id="pop-zoom-pct-dock" aria-live="polite">100%</span>
+            <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in-dock" aria-label="Zoom in" title="Zoom in">+</button>
+            <button type="button" class="pop-btn pop-zoom-dock-fit" id="pop-zoom-fit-dock" title="Fit entire canvas in view">Fit</button>
+            <button type="button" class="pop-btn pop-zoom-dock-reset" id="pop-zoom-reset-dock" title="Reset zoom to 100% and pan">100%</button>
+          </div>
         </div>
       </div>
     </div>
@@ -474,6 +523,8 @@ export function mount(root: HTMLElement): void {
   const btnDelete = root.querySelector<HTMLButtonElement>('#pop-delete')!
   const btnGroup = root.querySelector<HTMLButtonElement>('#pop-group')!
   const btnUngroup = root.querySelector<HTMLButtonElement>('#pop-ungroup')!
+  const btnBringFront = root.querySelector<HTMLButtonElement>('#pop-bring-front')!
+  const btnSendBack = root.querySelector<HTMLButtonElement>('#pop-send-back')!
   const btnCreateComp = root.querySelector<HTMLButtonElement>('#pop-create-comp')!
   const btnDetach = root.querySelector<HTMLButtonElement>('#pop-detach')!
   const btnEditComp = root.querySelector<HTMLButtonElement>('#pop-edit-comp')!
@@ -513,7 +564,13 @@ export function mount(root: HTMLElement): void {
   const btnZoomIn = root.querySelector<HTMLButtonElement>('#pop-zoom-in')!
   const btnZoomOut = root.querySelector<HTMLButtonElement>('#pop-zoom-out')!
   const btnZoomReset = root.querySelector<HTMLButtonElement>('#pop-zoom-reset')!
+  const btnZoomFit = root.querySelector<HTMLButtonElement>('#pop-zoom-fit')!
   const elZoomPct = root.querySelector<HTMLElement>('#pop-zoom-pct')!
+  const btnZoomInDock = root.querySelector<HTMLButtonElement>('#pop-zoom-in-dock')!
+  const btnZoomOutDock = root.querySelector<HTMLButtonElement>('#pop-zoom-out-dock')!
+  const btnZoomResetDock = root.querySelector<HTMLButtonElement>('#pop-zoom-reset-dock')!
+  const btnZoomFitDock = root.querySelector<HTMLButtonElement>('#pop-zoom-fit-dock')!
+  const elZoomPctDock = root.querySelector<HTMLElement>('#pop-zoom-pct-dock')!
   const canvasBgEl = root.querySelector<SVGRectElement>('#pop-canvas-bg')!
   const frameOutlinesG = root.querySelector<SVGGElement>('#pop-frame-outlines')!
   const popFramePick = root.querySelector<HTMLSelectElement>('#pop-frame-pick')!
@@ -703,12 +760,110 @@ export function mount(root: HTMLElement): void {
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null
 
+  /** ~1 screen pixel per world unit, for hairline strokes that match the CSS grid weight. */
+  function getScreenPxPerWorldUnit(): number {
+    const ctm = viewportG.getScreenCTM()
+    if (!ctm) return 1
+    const p0 = svg.createSVGPoint()
+    p0.x = 0
+    p0.y = 0
+    const p1 = svg.createSVGPoint()
+    p1.x = 1
+    p1.y = 0
+    const s0 = p0.matrixTransform(ctm)
+    const s1 = p1.matrixTransform(ctm)
+    return Math.max(Math.hypot(s1.x - s0.x, s1.y - s0.y), 1e-6)
+  }
+
+  /** Scale symmetry + snap guide strokes with zoom so they match the workspace grid (hairline on screen). */
+  function syncGuidePresentation(): void {
+    const px = getScreenPxPerWorldUnit()
+    const hair = 1 / px
+    const snapStroke = Math.max(hair * 1.5, 0.001)
+    const dash = 8 / px
+    const gap = 6 / px
+    const dashStr = `${dash} ${gap}`
+    guidesBack.querySelectorAll('line').forEach((el) => {
+      el.setAttribute('stroke-width', String(hair))
+      el.setAttribute('stroke-dasharray', dashStr)
+      el.removeAttribute('vector-effect')
+    })
+    guidesFront.querySelectorAll('line').forEach((el) => {
+      el.setAttribute('stroke-width', String(snapStroke))
+      el.removeAttribute('stroke-dasharray')
+      el.removeAttribute('vector-effect')
+    })
+  }
+
+  function syncWorkspaceChrome(): void {
+    syncCanvasWorkspaceGrid()
+    syncGuidePresentation()
+  }
+
+  /** One workspace grid: CSS on canvas-wrap, aligned to world space via viewport CTM (pan/zoom/letterbox). */
+  function syncCanvasWorkspaceGrid(): void {
+    const ctm = viewportG.getScreenCTM()
+    if (!ctm) return
+    const worldToScreen = (wx: number, wy: number): { x: number; y: number } => {
+      const pt = svg.createSVGPoint()
+      pt.x = wx
+      pt.y = wy
+      const sp = pt.matrixTransform(ctm)
+      return { x: sp.x, y: sp.y }
+    }
+    const p0 = worldToScreen(0, 0)
+    const px = worldToScreen(GRID_PATTERN_WORLD, 0)
+    const py = worldToScreen(0, GRID_PATTERN_WORLD)
+    const pitchX = Math.hypot(px.x - p0.x, px.y - p0.y)
+    const pitchY = Math.hypot(py.x - p0.x, py.y - p0.y)
+    const pitch = Math.max((pitchX + pitchY) / 2, 0.75)
+
+    const wrap = canvasWrap.getBoundingClientRect()
+    const relX = p0.x - wrap.left
+    const relY = p0.y - wrap.top
+    const mod = (n: number, m: number): number => ((n % m) + m) % m
+    const ox = -mod(relX, pitch)
+    const oy = -mod(relY, pitch)
+
+    canvasWrap.style.setProperty('--pop-grid-pitch', `${pitch}px`)
+    canvasWrap.style.setProperty('--pop-grid-ox', `${ox}px`)
+    canvasWrap.style.setProperty('--pop-grid-oy', `${oy}px`)
+  }
+
   function syncViewportTransform(): void {
     viewportG.setAttribute('transform', `translate(${viewTx} ${viewTy}) scale(${viewScale})`)
+    syncWorkspaceChrome()
   }
 
   function updateZoomPctLabel(): void {
-    elZoomPct.textContent = `${Math.round(viewScale * 100)}%`
+    const t = `${Math.round(viewScale * 100)}%`
+    elZoomPct.textContent = t
+    elZoomPctDock.textContent = t
+  }
+
+  /** Scale and pan so the full world bounds fit inside the visible SVG with padding. */
+  function zoomToFitCanvas(): void {
+    const pad = 40
+    const sb = svg.getBoundingClientRect()
+    const aw = Math.max(64, sb.width - pad)
+    const ah = Math.max(64, sb.height - pad)
+    const ww = Math.max(1, worldW)
+    const wh = Math.max(1, worldH)
+    const ns = clamp(Math.min(aw / ww, ah / wh), MIN_VIEW_SCALE, MAX_VIEW_SCALE)
+    const wc = ww / 2
+    const hc = wh / 2
+    viewScale = ns
+    viewTx = 0
+    viewTy = 0
+    syncViewportTransform()
+    const cx = sb.left + sb.width / 2
+    const cy = sb.top + sb.height / 2
+    const w = clientToSvgCoords(cx, cy)
+    viewTx = viewScale * (w.x - wc)
+    viewTy = viewScale * (w.y - hc)
+    syncViewportTransform()
+    updateZoomPctLabel()
+    schedulePersist()
   }
 
   /** Change scale while keeping the given canvas point (world coords) under the cursor. */
@@ -1198,13 +1353,15 @@ export function mount(root: HTMLElement): void {
       l.setAttribute('stroke', '#c4b5fd')
       l.setAttribute('stroke-opacity', '0.35')
       l.setAttribute('stroke-width', '1')
-      l.setAttribute('stroke-dasharray', '8 6')
-      l.setAttribute('vector-effect', 'non-scaling-stroke')
       return l
     }
     const b = snapBoundsForFrame()
-    guidesBack.appendChild(mkLine(b.x + b.width / 2, b.y, b.x + b.width / 2, b.y + b.height))
-    guidesBack.appendChild(mkLine(b.x, b.y + b.height / 2, b.x + b.width, b.y + b.height / 2))
+    const cx = b.x + b.width / 2
+    const cy = b.y + b.height / 2
+    // Span the full world so guides stay consistent when panning/zooming (same as snap preview lines).
+    guidesBack.appendChild(mkLine(cx, 0, cx, worldH))
+    guidesBack.appendChild(mkLine(0, cy, worldW, cy))
+    syncGuidePresentation()
   }
 
   function renderSnapGuides(verticalX: number | null, horizontalY: number | null): void {
@@ -1216,8 +1373,7 @@ export function mount(root: HTMLElement): void {
       l.setAttribute('y1', '0')
       l.setAttribute('y2', String(worldH))
       l.setAttribute('stroke', '#c4d0ff')
-      l.setAttribute('stroke-width', '1.5')
-      l.setAttribute('vector-effect', 'non-scaling-stroke')
+      l.setAttribute('stroke-width', '1')
       guidesFront.appendChild(l)
     }
     if (horizontalY !== null) {
@@ -1227,10 +1383,10 @@ export function mount(root: HTMLElement): void {
       l.setAttribute('y1', String(horizontalY))
       l.setAttribute('y2', String(horizontalY))
       l.setAttribute('stroke', '#c4d0ff')
-      l.setAttribute('stroke-width', '1.5')
-      l.setAttribute('vector-effect', 'non-scaling-stroke')
+      l.setAttribute('stroke-width', '1')
       guidesFront.appendChild(l)
     }
+    syncGuidePresentation()
   }
 
   for (const el of [inpX, inpY, inpW, inpH, inpFs]) {
@@ -1437,6 +1593,136 @@ export function mount(root: HTMLElement): void {
         selected.delete(x)
       }
     }
+  }
+
+  function buildCopyPayload(): PopClipboardPayload | null {
+    const roots = selectedDeletionRoots()
+    if (roots.length === 0) return null
+    const idSet = new Set<string>()
+    for (const r of roots) {
+      for (const id of collectSubtreeIds(nodes, r)) idSet.add(id)
+    }
+    const nodesOut: Record<string, SceneNode> = {}
+    for (const id of idSet) {
+      const raw = nodes.get(id)
+      if (!raw) continue
+      const copy = JSON.parse(JSON.stringify(raw)) as SceneNode
+      const p = raw.parentId
+      if (p !== null && !idSet.has(p)) {
+        const wf = worldFrame(nodes, definitions, id)
+        if (!wf) continue
+        copy.parentId = null
+        copy.x = wf.x
+        copy.y = wf.y
+        copy.width = wf.width
+        copy.height = wf.height
+        if (copy.type === 'text') {
+          copy.height = wf.height
+        }
+      }
+      nodesOut[id] = copy
+    }
+    const layerNamesOut: Record<string, string> = {}
+    for (const id of idSet) {
+      const ln = layerNames[id]
+      if (ln) layerNamesOut[id] = ln
+    }
+    return {
+      popClipboard: POP_CLIPBOARD_VERSION,
+      roots: [...roots],
+      nodes: nodesOut,
+      layerNames: Object.keys(layerNamesOut).length > 0 ? layerNamesOut : undefined,
+    }
+  }
+
+  async function copySelectionToSystemClipboard(): Promise<void> {
+    const payload = buildCopyPayload()
+    if (!payload) return
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload))
+    } catch {
+      /* clipboard may be unavailable */
+    }
+  }
+
+  function pastePayloadIntoDocument(payload: PopClipboardPayload): void {
+    const oldIds = Object.keys(payload.nodes)
+    if (oldIds.length === 0 || payload.roots.length === 0) return
+    const idMap = new Map<string, string>()
+    for (const oid of oldIds) {
+      idMap.set(oid, newId())
+    }
+    for (const oid of oldIds) {
+      const raw = payload.nodes[oid]
+      if (!raw) continue
+      const nid = idMap.get(oid)!
+      const copy = JSON.parse(JSON.stringify(raw)) as SceneNode
+      copy.id = nid
+      const p = raw.parentId
+      copy.parentId = p === null ? null : idMap.get(p)!
+      if (copy.type === 'group' && raw.type === 'group') {
+        copy.childIds = raw.childIds.map((c) => idMap.get(c)!)
+      }
+      nodes.set(nid, copy)
+    }
+
+    const tops = selectedDeletionRoots()
+    let pasteParent: string | null
+    let insertAt: number
+    if (tops.length === 0) {
+      pasteParent = null
+      insertAt = roots().length
+    } else {
+      const first = nodes.get(tops[0]!)
+      pasteParent = first?.parentId ?? null
+      const sib = siblingListForParent(pasteParent)
+      const indices = tops.map((id) => sib.indexOf(id)).filter((i) => i >= 0)
+      insertAt = indices.length > 0 ? Math.max(...indices) + 1 : sib.length
+    }
+
+    const newSelection: string[] = []
+    let slot = insertAt
+    for (const oldRoot of payload.roots) {
+      const newId = idMap.get(oldRoot)
+      if (!newId) continue
+      const n = nodes.get(newId)
+      if (!n) continue
+
+      removeChildRef(n.parentId, newId)
+
+      const wf = worldFrame(nodes, definitions, newId)
+      if (!wf) {
+        insertChildRef(pasteParent, newId, slot++)
+        newSelection.push(newId)
+        continue
+      }
+      const ox = worldSpaceOriginForParent(pasteParent)
+      n.x = wf.x + PASTE_OFFSET_WORLD - ox.x
+      n.y = wf.y + PASTE_OFFSET_WORLD - ox.y
+
+      insertChildRef(pasteParent, newId, slot++)
+      newSelection.push(newId)
+    }
+
+    for (const [oid, nid] of idMap) {
+      const nm = payload.layerNames?.[oid]
+      if (nm) layerNames[nid] = nm
+    }
+
+    selected = new Set(newSelection)
+    commit()
+  }
+
+  async function pasteFromSystemClipboard(): Promise<void> {
+    let raw: string
+    try {
+      raw = await navigator.clipboard.readText()
+    } catch {
+      return
+    }
+    const payload = parsePopClipboard(raw)
+    if (!payload) return
+    pastePayloadIntoDocument(payload)
   }
 
   function groupSelection(): void {
@@ -1929,6 +2215,8 @@ export function mount(root: HTMLElement): void {
 
   function updateSelectionUi(): void {
     btnDelete.disabled = selected.size === 0
+    btnBringFront.disabled = selected.size === 0
+    btnSendBack.disabled = selected.size === 0
     updateHierarchyButtons()
     layerList.querySelectorAll<HTMLLIElement>('.pop-layer').forEach((li) => {
       const id = li.dataset.id
@@ -1961,6 +2249,73 @@ export function mount(root: HTMLElement): void {
     if (parentId === null) return roots()
     const p = nodes.get(parentId)
     return p?.type === 'group' ? p.childIds : []
+  }
+
+  /** Mutable sibling order for paint order (first = back, last = front). */
+  function getMutableSiblingList(nodeId: string): string[] | null {
+    const n = nodes.get(nodeId)
+    if (!n) return null
+    if (n.parentId !== null) {
+      const p = nodes.get(n.parentId)
+      return p?.type === 'group' ? p.childIds : null
+    }
+    if (componentEditRoots !== null) {
+      return componentEditRoots.includes(nodeId) ? componentEditRoots : null
+    }
+    for (const f of frames) {
+      if (f.rootIds.includes(nodeId)) return f.rootIds
+    }
+    return null
+  }
+
+  /** Groups roots that share the same sibling list (frame roots, component roots, or group children). */
+  function siblingGroupKey(id: string): string | null {
+    const n = nodes.get(id)
+    if (!n) return null
+    if (n.parentId !== null) return `g:${n.parentId}`
+    if (componentEditRoots !== null) {
+      return componentEditRoots.includes(id) ? 'comp' : null
+    }
+    for (const f of frames) {
+      if (f.rootIds.includes(id)) return `f:${f.id}`
+    }
+    return null
+  }
+
+  function reorderSelectedInStack(mode: 'front' | 'back'): void {
+    const tops = selectedDeletionRoots()
+    if (tops.length === 0) return
+    const byKey = new Map<string, string[]>()
+    for (const id of tops) {
+      const k = siblingGroupKey(id)
+      if (!k) continue
+      const arr = byKey.get(k) ?? []
+      arr.push(id)
+      byKey.set(k, arr)
+    }
+    if (byKey.size === 0) return
+    for (const ids of byKey.values()) {
+      const sample = ids[0]!
+      const list = getMutableSiblingList(sample)
+      if (!list) continue
+      const idSet = new Set(ids)
+      const sorted = [...ids].sort((a, b) => list.indexOf(a) - list.indexOf(b))
+      const rest = list.filter((x) => !idSet.has(x))
+      if (mode === 'front') {
+        list.splice(0, list.length, ...rest, ...sorted)
+      } else {
+        list.splice(0, list.length, ...sorted, ...rest)
+      }
+    }
+    commit()
+  }
+
+  function bringSelectionToFront(): void {
+    reorderSelectedInStack('front')
+  }
+
+  function sendSelectionToBack(): void {
+    reorderSelectedInStack('back')
   }
 
   /** Wrap a single leaf in a new group at the same place in the tree (for nest-into). */
@@ -2346,6 +2701,26 @@ export function mount(root: HTMLElement): void {
     return { x: ox, y: oy }
   }
 
+  /** World-space position of the origin of `parentId`'s local coordinate system (direct children use this offset). */
+  function worldSpaceOriginForParent(parentId: string | null): { x: number; y: number } {
+    if (parentId === null) return { x: 0, y: 0 }
+    let ox = 0
+    let oy = 0
+    let cur: string | null = parentId
+    const chain: SceneNode[] = []
+    while (cur) {
+      const node = nodes.get(cur)
+      if (!node) break
+      chain.unshift(node)
+      cur = node.parentId
+    }
+    for (const node of chain) {
+      ox += node.x
+      oy += node.y
+    }
+    return { x: ox, y: oy }
+  }
+
   function pointerToLocalParent(px: number, py: number, nodeId: string): { x: number; y: number } {
     const o = parentWorldOrigin(nodeId)
     return { x: px - o.x, y: py - o.y }
@@ -2438,18 +2813,36 @@ export function mount(root: HTMLElement): void {
     svg.setAttribute('height', String(worldH))
     canvasBgEl.setAttribute('width', String(worldW))
     canvasBgEl.setAttribute('height', String(worldH))
+    syncWorkspaceChrome()
   }
 
   function renderFrameOutlines(): void {
     frameOutlinesG.replaceChildren()
+    const inactiveStroke = 'rgba(124,156,255,0.35)'
+    const activeStroke = '#7c9cff'
     for (const f of frames) {
+      // One full-canvas frame reads as a permanent “selection” over the grid; skip chrome
+      // so zoom/pan feels like a free workspace (outlines return for multi-frame or inset frames).
+      if (
+        frames.length === 1 &&
+        f.x === 0 &&
+        f.y === 0 &&
+        f.width >= worldW &&
+        f.height >= worldH
+      ) {
+        continue
+      }
       const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
       r.setAttribute('x', String(f.x))
       r.setAttribute('y', String(f.y))
       r.setAttribute('width', String(f.width))
       r.setAttribute('height', String(f.height))
       r.setAttribute('fill', 'none')
-      r.setAttribute('stroke', f.id === activeFrameId ? '#7c9cff' : 'rgba(124,156,255,0.35)')
+      const isActive = f.id === activeFrameId
+      r.setAttribute(
+        'stroke',
+        frames.length > 1 && isActive ? activeStroke : inactiveStroke,
+      )
       r.setAttribute('stroke-width', '1')
       r.setAttribute('stroke-dasharray', '6 4')
       r.setAttribute('vector-effect', 'non-scaling-stroke')
@@ -2506,6 +2899,8 @@ export function mount(root: HTMLElement): void {
 
   btnGroup.addEventListener('click', () => groupSelection())
   btnUngroup.addEventListener('click', () => ungroupSelection())
+  btnBringFront.addEventListener('click', () => bringSelectionToFront())
+  btnSendBack.addEventListener('click', () => sendSelectionToBack())
   btnCreateComp.addEventListener('click', () => createComponentFromSelection())
   btnDetach.addEventListener('click', () => detachInstance())
   btnEditComp.addEventListener('click', () => {
@@ -2525,26 +2920,58 @@ export function mount(root: HTMLElement): void {
   syncViewportTransform()
   updateZoomPctLabel()
 
-  btnZoomIn.addEventListener('click', () => {
-    zoomAtWorldPoint(worldW / 2, worldH / 2, viewScale * 1.2)
+  const gridSyncRo = new ResizeObserver(() => syncWorkspaceChrome())
+  gridSyncRo.observe(canvasWrap)
+  canvasWrap.addEventListener('scroll', () => syncWorkspaceChrome(), { passive: true })
+  requestAnimationFrame(() => {
+    syncWorkspaceChrome()
+    requestAnimationFrame(() => syncWorkspaceChrome())
   })
-  btnZoomOut.addEventListener('click', () => {
-    zoomAtWorldPoint(worldW / 2, worldH / 2, viewScale / 1.2)
+
+  function bindZoomControls(
+    btnIn: HTMLButtonElement,
+    btnOut: HTMLButtonElement,
+    btnReset: HTMLButtonElement,
+  ): void {
+    btnIn.addEventListener('click', () => {
+      zoomAtWorldPoint(worldW / 2, worldH / 2, viewScale * 1.2)
+    })
+    btnOut.addEventListener('click', () => {
+      zoomAtWorldPoint(worldW / 2, worldH / 2, viewScale / 1.2)
+    })
+    btnReset.addEventListener('click', () => {
+      viewTx = 0
+      viewTy = 0
+      viewScale = 1
+      syncViewportTransform()
+      updateZoomPctLabel()
+      schedulePersist()
+    })
+  }
+  bindZoomControls(btnZoomIn, btnZoomOut, btnZoomReset)
+  bindZoomControls(btnZoomInDock, btnZoomOutDock, btnZoomResetDock)
+
+  btnZoomFit.addEventListener('click', () => {
+    zoomToFitCanvas()
   })
-  btnZoomReset.addEventListener('click', () => {
-    viewTx = 0
-    viewTy = 0
-    viewScale = 1
-    syncViewportTransform()
-    updateZoomPctLabel()
-    schedulePersist()
+  btnZoomFitDock.addEventListener('click', () => {
+    zoomToFitCanvas()
   })
 
   canvasWrap.addEventListener(
     'wheel',
     (ev) => {
-      if (!ev.ctrlKey && !ev.metaKey) return
       if (!canvasWrap.contains(ev.target as Node)) return
+      // ⌘+scroll: pan. Ctrl+scroll / pinch (ctrl) keeps zoom; avoids ⌘ also setting ctrl on some setups.
+      if (ev.metaKey && !ev.ctrlKey) {
+        ev.preventDefault()
+        viewTx -= ev.deltaX
+        viewTy -= ev.deltaY
+        syncViewportTransform()
+        schedulePersist()
+        return
+      }
+      if (!ev.ctrlKey) return
       ev.preventDefault()
       const wf = clientToSvgCoords(ev.clientX, ev.clientY)
       const factor = Math.exp(-ev.deltaY * 0.002)
@@ -2993,9 +3420,45 @@ ${parts}
       exitComponentEdit(false)
       return
     }
+    const tEl = ev.target as HTMLElement | null
+    const inFormField =
+      Boolean(tEl?.closest?.('input, textarea, select, [contenteditable="true"]')) ||
+      Boolean(tEl?.isContentEditable)
+    if (inFormField) {
+      if (ev.key === 'Delete' || ev.key === 'Backspace') return
+      if (ev.metaKey || ev.ctrlKey) {
+        const k = ev.key.toLowerCase()
+        if (k === 'c' || k === 'v') return
+      }
+    }
+    const mod = ev.metaKey || ev.ctrlKey
+    if (mod) {
+      const k = ev.key.toLowerCase()
+      if (k === 'c') {
+        if (selected.size === 0) return
+        ev.preventDefault()
+        void copySelectionToSystemClipboard()
+        return
+      }
+      if (k === 'v') {
+        ev.preventDefault()
+        void pasteFromSystemClipboard()
+        return
+      }
+      if (ev.shiftKey && selected.size > 0) {
+        if (ev.code === 'BracketRight') {
+          ev.preventDefault()
+          bringSelectionToFront()
+          return
+        }
+        if (ev.code === 'BracketLeft') {
+          ev.preventDefault()
+          sendSelectionToBack()
+          return
+        }
+      }
+    }
     if (ev.key === 'Delete' || ev.key === 'Backspace') {
-      const t = ev.target as HTMLElement
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
       if (selected.size === 0) return
       ev.preventDefault()
       deleteNodesSubtrees(selectedDeletionRoots())
@@ -3013,7 +3476,7 @@ ${parts}
   })
 
   btnFrameAdd.addEventListener('click', () => {
-    const b = computeWorldBounds(frames, VIEW_W, VIEW_H)
+    const b = computeWorldBoundsWithContent(frames, nodes, definitions, VIEW_W, VIEW_H)
     const nf = createDefaultFrame()
     nf.x = b.worldW + 32
     nf.y = 0
