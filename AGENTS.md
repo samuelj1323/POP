@@ -1,6 +1,6 @@
 # POP — agent and LLM context
 
-This repository is **Pop**, a browser-based SVG canvas editor (Svelte 5 + Vite + TypeScript). The product name in the UI is **POP**. Users draw shapes, text, and images; export **SVG** or **HTML**.
+This repository is **Pop**, a browser-based **vibe designing** platform for **web and mobile** layouts (Svelte 5 + Vite + TypeScript). The product name in the UI is **POP**. Users sketch screens and graphics on an SVG canvas with frames; export **SVG** or **HTML**.
 
 ## Quick commands
 
@@ -45,10 +45,10 @@ Current document version is **`PopDocumentV3`** (`v: 3`); persistence uses **`ST
 
 ## Design assistant (LLM ↔ canvas)
 
-The in-app **Design assistant** (right column in `svg-studio.ts`, `pop-ai-*` elements) connects an LLM to the live document:
+The in-app **Design assistant** (right column in `svg-studio.ts`, `pop-ai-*` elements) connects an LLM to the live document for **vibe designing** web and mobile UI (natural language → structured canvas edits):
 
-1. **Send context**: The current document is serialized with `documentToV3Json(buildDocumentV3())` and sent with the user’s natural-language request.
-2. **Model output**: The model must return **only JSON**: a JSON array of patch operations, or `{"ops":[...]}`. The system prompt is `buildDesignLlmSystemPrompt()` in `llm-design.ts` (allowed ops match `patch.ts`).
+1. **Send context**: The user message includes a short POP product framing plus the current document from `documentToV3Json(buildDocumentV3())` and the user’s natural-language request.
+2. **Model output**: The model must return **only JSON**: a JSON array of patch operations, or `{"ops":[...]}`. The system prompt is `buildDesignLlmSystemPrompt()` in `llm-design.ts` (allowed ops match `patch.ts`); it describes POP as a web/mobile vibe designing tool and asks the model to interpret UI-oriented requests accordingly.
 3. **Apply**: `parsePatchOpsFromLlmText` → `applyPatch` → `applyDocumentV3` in `svg-studio.ts`, then the canvas re-renders and state persists as usual.
 
 **API**: The UI uses **Google Gemini** only: the endpoint URL is built with `buildGeminiGenerateContentUrl(modelId)`; the API key is sent as **`X-goog-api-key`**. `fetchDesignLlmReply` still supports an OpenAI-style URL if passed programmatically. **Configuration**: `localStorage` keys `pop-ai-key`, `pop-ai-model` (selected Gemini id), or Vite defaults **`VITE_POP_AI_KEY`**, **`VITE_POP_AI_MODEL`** (see `.env.example`). Direct browser calls may be blocked by **CORS**; use a same-origin proxy if needed.
@@ -65,13 +65,14 @@ The in-app **Design assistant** (right column in `svg-studio.ts`, `pop-ai-*` ele
 Use this when asking an LLM to implement a feature in this repo:
 
 ```text
-You are working in the POP repo: a Svelte 5 + Vite + TypeScript SVG editor.
+You are working in the POP repo: a Svelte 5 + Vite + TypeScript SVG editor positioned as a vibe designing platform for web and mobile (browser canvas, SVG/HTML export).
 
 Constraints:
 - Read AGENTS.md at the repo root for architecture.
 - Prefer editing src/studio/ for types and pure logic; svg-studio.ts for UI and canvas behavior (file is large—search before editing).
 - After changing types, run: npm run check
 - Match existing CSS class prefix pop-* and existing patterns in svg-studio.ts.
+- When changing product-facing copy, SEO (`index.html`), or the Design assistant, keep messaging aligned with vibe designing for web and mobile.
 
 Task:
 <describe the feature: user-visible behavior, edge cases, and any new types or tools>
@@ -87,6 +88,7 @@ If generating a new screen or module from scratch:
 
 ```text
 Stack: Svelte 5 (runes), Vite, TypeScript. Entry: src/main.ts → App.svelte.
+POP is a vibe designing tool for web and mobile UI on an SVG canvas with frames; export SVG or HTML.
 Studio editor is mounted via svg-studio.ts mount(). For new features, either extend src/studio/ types and wire in svg-studio.ts, or add a new .svelte component and import it from App.svelte if the feature is separate from the canvas.
 Follow existing patterns in src/style.css and pop-* class names.
 ```

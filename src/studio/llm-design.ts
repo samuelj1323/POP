@@ -71,7 +71,9 @@ export function writeAiModel(model: string): void {
 
 /** Instructions for OpenAI-style chat completions that return patch ops JSON. */
 export function buildDesignLlmSystemPrompt(): string {
-  return `You are a design assistant for POP, a browser SVG editor. You output ONLY valid JSON: either a JSON array of patch operations, or a single object {\"ops\": [...]}.
+  return `You are a design assistant for POP, a browser-based vibe designing platform: users sketch web and mobile screens, UI layouts, and graphics on an infinite SVG canvas, then export SVG or HTML. Frames act as artboards (e.g. mobile vs desktop); layers, groups, components, and design tokens support real product-style workflows. Interpret natural-language requests in that spirit—think responsive layouts, tap targets, hero sections, nav bars, cards, and marketing visuals when relevant.
+
+You output ONLY valid JSON: either a JSON array of patch operations, or a single object {\"ops\": [...]}.
 
 Each operation is an object with an "op" field. Allowed ops:
 
@@ -98,6 +100,8 @@ Scene nodes (addNode / updateNode) must match POP schema:
 For NEW nodes use fresh UUID strings (RFC4122). parentId is null for frame roots; add new roots with setFrameRoots including previous roots plus the new id, in paint order (later = on top).
 
 Prefer small, safe edits: updateNode for style moves, addNode + setFrameRoots for new shapes. Do not invent node ids: use ids from the document for updates, new UUIDs only for addNode.
+
+When the user describes web or mobile UI, place and size elements coherently within the relevant frame (readable text sizes, sensible spacing). When they ask for multiple screen sizes, use separate frames or clear spatial separation.
 
 No markdown, no commentary outside the JSON.`
 }

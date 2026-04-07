@@ -229,7 +229,7 @@ export function mount(root: HTMLElement): void {
       <header class="pop-chrome-min" role="banner">
         <div class="pop-chrome-min-inner">
           <h1 class="pop-title">POP</h1>
-          <p class="pop-sub" title="Draw on the canvas, add images, then export SVG. Raster images become &lt;image&gt; in the SVG (embedded), not auto-traced.">Shapes, text &amp; images · export SVG/HTML</p>
+          <p class="pop-sub" title="Vibe designing for web and mobile in the browser. Draw on the canvas, add images, then export SVG or HTML. Raster images become &lt;image&gt; in the SVG (embedded), not auto-traced."><span class="pop-sub-lead">Vibe designing for web &amp; mobile.</span> Sketch UI and graphics on the canvas—shapes, text &amp; images—then export SVG or HTML.</p>
         </div>
       </header>
       <div class="pop-main">
@@ -499,7 +499,7 @@ export function mount(root: HTMLElement): void {
           </div>
         </div>
         <div class="pop-canvas-wrap" title="⌘+scroll to pan · Ctrl+scroll or pinch to zoom toward the pointer">
-          <svg class="pop-canvas" id="pop-svg" viewBox="0 0 ${VIEW_W} ${VIEW_H}" width="${VIEW_W}" height="${VIEW_H}" role="img" aria-label="Design canvas">
+          <svg class="pop-canvas" id="pop-svg" viewBox="0 0 ${VIEW_W} ${VIEW_H}" width="${VIEW_W}" height="${VIEW_H}" role="img" aria-label="Vibe designing canvas for web and mobile layouts">
             <g id="pop-viewport" transform="translate(0 0) scale(1)">
               <rect class="pop-canvas-bg" id="pop-canvas-bg" x="0" y="0" width="${VIEW_W}" height="${VIEW_H}" fill="transparent" pointer-events="none"/>
               <g id="pop-frame-outlines" pointer-events="none"></g>
@@ -517,17 +517,18 @@ export function mount(root: HTMLElement): void {
             <button type="button" class="pop-btn pop-zoom-dock-reset" id="pop-zoom-reset-dock" title="Reset zoom to 100% and pan">100%</button>
           </div>
         </div>
-        <aside class="pop-ai-pane" aria-label="AI design assistant">
+        <aside class="pop-ai-pane" aria-label="AI design assistant for vibe designing">
           <div class="pop-ai-pane-head">
             <h2 class="pop-panel-h">Design assistant</h2>
+            <p class="pop-ai-pane-tagline">Web &amp; mobile · JSON patches</p>
           </div>
           <div class="pop-ai-pane-chat pop-ai-log" id="pop-ai-log" role="log" aria-live="polite"></div>
           <div class="pop-ai-pane-composer">
             <textarea
               class="pop-ai-prompt"
               id="pop-ai-prompt"
-              placeholder="Example: Add a muted purple rectangle at the bottom of frame 1 and bump default corner radius on selected rects."
-              aria-label="Design request for AI"
+              placeholder="Example: In frame 1, add a mobile-style header bar (full width), a hero title, and two card rows with muted fills—keep spacing comfortable for touch."
+              aria-label="Design request for POP vibe designing assistant"
             ></textarea>
             <div class="pop-ai-actions">
               <button type="button" class="pop-btn pop-primary" id="pop-ai-send">Apply with AI</button>
@@ -537,6 +538,7 @@ export function mount(root: HTMLElement): void {
           <details class="pop-ai-settings">
             <summary>Google AI (Gemini)</summary>
             <p class="pop-panel-desc">
+              Describe web or mobile layouts in plain language; the model applies structured edits to your canvas.
               Get a key from
               <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a>.
               The model must reply with JSON patch operations only. Browser calls may be blocked by CORS; use a
@@ -3283,7 +3285,9 @@ export function mount(root: HTMLElement): void {
     writeAiModel(modelId)
 
     const docJson = documentToV3Json(buildDocumentV3())
-    const userContent = `Current document (PopDocumentV3 JSON):\n${docJson}\n\nUser request:\n${prompt}\n\nRespond with ONLY a JSON array of patch ops, or a single object {"ops":[...]}.`
+    const userContent = `Context: POP is a vibe designing tool for web and mobile—frames are artboards; the document below is the live canvas state.
+
+Current document (PopDocumentV3 JSON):\n${docJson}\n\nUser request:\n${prompt}\n\nRespond with ONLY a JSON array of patch ops, or a single object {"ops":[...]}.`
 
     aiAbort?.abort()
     aiAbort = new AbortController()
