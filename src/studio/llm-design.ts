@@ -121,6 +121,127 @@ export function parsePatchOpsFromLlmText(text: string): { ok: true; ops: PatchOp
 
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string }
 
+/** Google AI Studio / Gemini `generateContent` (uses `X-goog-api-key`, not Bearer). */
+export function isGeminiGenerateContentEndpoint(url: string): boolean {
+  try {
+    const u = new URL(url)
+    return (
+      u.hostname === 'generativelanguage.googleapis.com' && u.pathname.includes(':generateContent')
+    )
+  } catch {
+    return false
+  }
+}
+
+function textFromGeminiResponse(data: unknown): { ok: true; text: string } | { ok: false; error: string } {
+  const o = data as Record<string, unknown>
+  const err = o?.error as Record<string, unknown> | undefined
+  if (err && typeof err.message === 'string') {
+    return { ok: false, error: err.message }
+  }
+  const candidates = o?.candidates as unknown[] | undefined
+  const first = candidates?.[0] as Record<string, unknown> | undefined
+  if (!first) {
+    const fb = o?.promptFeedback as Record<string, unknown> | undefined
+    const br = fb?.blockReason
+    if (typeof br === 'string') return { ok: false, error: `Blocked: ${br}` }
+    return { ok: false, error: 'No candidates in response' }
+  }
+  const content = first.content as Record<string, unknown> | undefined
+  const parts = content?.parts as unknown[] | undefined
+  if (!parts?.length) return { ok: false, error: 'No content parts in response' }
+  const chunks: string[] = []
+  for (const p of parts) {
+    const part = p as Record<string, unknown>
+    if (typeof part.text === 'string') chunks.push(part.text)
+  }
+  if (chunks.length === 0) return { ok: false, error: 'No text in response parts' }
+  return { ok: true, text: chunks.join('') }
+}
+
+async function fetchGeminiGenerateContent(params: {
+  endpoint: string
+  apiKey: string
+  systemText: string
+  userText: string
+  signal?: AbortSignal
+}): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
+  const { endpoint, apiKey, systemText, userText, signal } = params
+  if (!apiKey.trim()) {
+    return { ok: false, error: 'API key required for Gemini (X-goog-api-key).' }
+  }
+
+  let res: Response
+  try {
+    res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-goog-api-key': apiKey.trim(),
+      },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemText }] },
+        contents: [{ role: 'user', parts: [{ text: userText }] }],
+        generationConfig: { temperature: 0.2 },
+      }),
+      signal,
+    })
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      return { ok: false, error: 'aborted' }
+    }
+    return { ok: false, error: e instanceof Error ? e.message : 'Network error' }
+  }
+
+  let data: unknown
+  try {
+    data = (await res.json()) as unknown
+  } catch {
+    return { ok: false, error: 'Response was not JSON' }
+  }
+
+  if (!res.ok) {
+    const parsed = textFromGeminiResponse(data)
+    if (!parsed.ok) return { ok: false, error: `HTTP ${res.status}: ${parsed.error}` }
+    return { ok: false, error: `HTTP ${res.status}` }
+  }
+
+  const parsed = textFromGeminiResponse(data)
+  if (!parsed.ok) return { ok: false, error: parsed.error }
+  return { ok: true, content: parsed.text }
+}
+
+/** OpenAI-compatible chat or Gemini `generateContent`, depending on endpoint URL. */
+export async function fetchDesignLlmReply(params: {
+  endpoint: string
+  apiKey?: string
+  model: string
+  systemPrompt: string
+  userContent: string
+  signal?: AbortSignal
+}): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
+  const { endpoint, apiKey, model, systemPrompt, userContent, signal } = params
+  if (isGeminiGenerateContentEndpoint(endpoint)) {
+    return fetchGeminiGenerateContent({
+      endpoint,
+      apiKey: apiKey ?? '',
+      systemText: systemPrompt,
+      userText: userContent,
+      signal,
+    })
+  }
+  return fetchOpenAiCompatibleChat({
+    endpoint,
+    apiKey,
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userContent },
+    ],
+    signal,
+  })
+}
+
 export async function fetchOpenAiCompatibleChat(params: {
   endpoint: string
   apiKey?: string

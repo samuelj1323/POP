@@ -69,7 +69,8 @@ import {
 import { downloadHtml, exportFrameToHtml } from './studio/html-export.ts'
 import {
   buildDesignLlmSystemPrompt,
-  fetchOpenAiCompatibleChat,
+  fetchDesignLlmReply,
+  isGeminiGenerateContentEndpoint,
   parsePatchOpsFromLlmText,
   readAiSettingsFromStorage,
   writeAiEndpoint,
@@ -536,16 +537,30 @@ export function mount(root: HTMLElement): void {
             <summary>API connection</summary>
             <p class="pop-panel-desc">
               Describe changes; the model must reply with JSON patch operations only. Use an OpenAI-compatible
-              <span class="pop-code">POST …/chat/completions</span> URL. Direct calls to OpenAI from the browser are often blocked by CORS—use a small proxy or DevTools extension if needed.
+              <span class="pop-code">POST …/chat/completions</span> URL, or a Gemini
+              <span class="pop-code">…/models/&lt;id&gt;:generateContent</span> URL (API key sent as
+              <span class="pop-code">X-goog-api-key</span>). Direct calls to some providers from the browser may hit
+              CORS—use a same-origin proxy if needed.
             </p>
             <div class="pop-ai-field-grid">
               <label class="pop-field pop-field-fs">
                 <span class="pop-field-lbl">Endpoint</span>
-                <input type="url" id="pop-ai-endpoint" placeholder="https://api.openai.com/v1/chat/completions" spellcheck="false" autocomplete="off" />
+                <input
+                  type="url"
+                  id="pop-ai-endpoint"
+                  placeholder="OpenAI chat URL or Gemini …/models/gemini-flash-latest:generateContent"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
               </label>
               <label class="pop-field pop-field-fs">
                 <span class="pop-field-lbl">API key</span>
-                <input type="password" id="pop-ai-key" placeholder="Optional if your proxy adds auth" autocomplete="off" />
+                <input
+                  type="password"
+                  id="pop-ai-key"
+                  placeholder="Bearer token, or Gemini API key (X-goog-api-key)"
+                  autocomplete="off"
+                />
               </label>
               <label class="pop-field pop-field-fs">
                 <span class="pop-field-lbl">Model</span>
@@ -3266,8 +3281,12 @@ export function mount(root: HTMLElement): void {
     if (!endpoint) {
       appendAiLog(
         'err',
-        'Set an API endpoint (OpenAI-compatible chat completions), or define VITE_POP_AI_URL in .env.',
+        'Set an API endpoint (OpenAI chat completions or Gemini generateContent), or define VITE_POP_AI_URL in .env.',
       )
+      return
+    }
+    if (isGeminiGenerateContentEndpoint(endpoint) && !apiKey) {
+      appendAiLog('err', 'Gemini requires an API key in the API key field (X-goog-api-key).')
       return
     }
     writeAiEndpoint(endpoint)
@@ -3283,14 +3302,12 @@ export function mount(root: HTMLElement): void {
     aiStatusEl.textContent = 'Waiting for model…'
     appendAiLog('user', prompt)
 
-    const chat = await fetchOpenAiCompatibleChat({
+    const chat = await fetchDesignLlmReply({
       endpoint,
       apiKey: apiKey || undefined,
       model,
-      messages: [
-        { role: 'system', content: buildDesignLlmSystemPrompt() },
-        { role: 'user', content: userContent },
-      ],
+      systemPrompt: buildDesignLlmSystemPrompt(),
+      userContent,
       signal: aiAbort.signal,
     })
 
