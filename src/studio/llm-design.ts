@@ -4,6 +4,28 @@ const AI_STORAGE_ENDPOINT = 'pop-ai-endpoint'
 const AI_STORAGE_KEY = 'pop-ai-key'
 const AI_STORAGE_MODEL = 'pop-ai-model'
 
+/** Google AI Studio `generateContent` base; model id is inserted before `:generateContent`. */
+export const GEMINI_GENERATE_CONTENT_API_BASE =
+  'https://generativelanguage.googleapis.com/v1beta/models'
+
+/** Models commonly available on the Gemini API free tier (text `generateContent`); ids match the API. */
+export const GOOGLE_AI_STUDIO_GEMINI_MODELS: readonly { id: string; label: string }[] = [
+  { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite' },
+  { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+  { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+  { id: 'gemini-flash-latest', label: 'Gemini Flash (latest)' },
+  { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash (preview)' },
+] as const
+
+export function buildGeminiGenerateContentUrl(modelId: string): string {
+  const id = modelId.trim()
+  return `${GEMINI_GENERATE_CONTENT_API_BASE}/${encodeURIComponent(id)}:generateContent`
+}
+
+export function defaultGeminiModelId(): string {
+  return 'gemini-2.5-flash'
+}
+
 export function readAiSettingsFromStorage(): {
   endpoint: string
   apiKey: string

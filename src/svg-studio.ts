@@ -69,11 +69,12 @@ import {
 import { downloadHtml, exportFrameToHtml } from './studio/html-export.ts'
 import {
   buildDesignLlmSystemPrompt,
+  buildGeminiGenerateContentUrl,
+  defaultGeminiModelId,
   fetchDesignLlmReply,
-  isGeminiGenerateContentEndpoint,
+  GOOGLE_AI_STUDIO_GEMINI_MODELS,
   parsePatchOpsFromLlmText,
   readAiSettingsFromStorage,
-  writeAiEndpoint,
   writeAiKey,
   writeAiModel,
 } from './studio/llm-design.ts'
@@ -534,37 +535,26 @@ export function mount(root: HTMLElement): void {
             </div>
           </div>
           <details class="pop-ai-settings">
-            <summary>API connection</summary>
+            <summary>Google AI (Gemini)</summary>
             <p class="pop-panel-desc">
-              Describe changes; the model must reply with JSON patch operations only. Use an OpenAI-compatible
-              <span class="pop-code">POST …/chat/completions</span> URL, or a Gemini
-              <span class="pop-code">…/models/&lt;id&gt;:generateContent</span> URL (API key sent as
-              <span class="pop-code">X-goog-api-key</span>). Direct calls to some providers from the browser may hit
-              CORS—use a same-origin proxy if needed.
+              Get a key from
+              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a>.
+              The model must reply with JSON patch operations only. Browser calls may be blocked by CORS; use a
+              same-origin proxy if needed.
             </p>
             <div class="pop-ai-field-grid">
               <label class="pop-field pop-field-fs">
-                <span class="pop-field-lbl">Endpoint</span>
-                <input
-                  type="url"
-                  id="pop-ai-endpoint"
-                  placeholder="OpenAI chat URL or Gemini …/models/gemini-flash-latest:generateContent"
-                  spellcheck="false"
-                  autocomplete="off"
-                />
+                <span class="pop-field-lbl">Model</span>
+                <select id="pop-ai-model" aria-label="Gemini model"></select>
               </label>
               <label class="pop-field pop-field-fs">
                 <span class="pop-field-lbl">API key</span>
                 <input
                   type="password"
                   id="pop-ai-key"
-                  placeholder="Bearer token, or Gemini API key (X-goog-api-key)"
+                  placeholder="Google AI Studio API key"
                   autocomplete="off"
                 />
-              </label>
-              <label class="pop-field pop-field-fs">
-                <span class="pop-field-lbl">Model</span>
-                <input type="text" id="pop-ai-model" spellcheck="false" autocomplete="off" />
               </label>
             </div>
           </details>
@@ -679,9 +669,8 @@ export function mount(root: HTMLElement): void {
   const btnCopyCssVars = root.querySelector<HTMLButtonElement>('#pop-copy-css-vars')!
   const btnRibbonCopyTokensJson = root.querySelector<HTMLButtonElement>('#pop-ribbon-copy-tokens-json')!
   const btnRibbonCopyCssVars = root.querySelector<HTMLButtonElement>('#pop-ribbon-copy-css-vars')!
-  const aiEndpointInput = root.querySelector<HTMLInputElement>('#pop-ai-endpoint')!
   const aiKeyInput = root.querySelector<HTMLInputElement>('#pop-ai-key')!
-  const aiModelInput = root.querySelector<HTMLInputElement>('#pop-ai-model')!
+  const aiModelSelect = root.querySelector<HTMLSelectElement>('#pop-ai-model')!
   const aiLogEl = root.querySelector<HTMLElement>('#pop-ai-log')!
   const aiPromptTextarea = root.querySelector<HTMLTextAreaElement>('#pop-ai-prompt')!
   const btnAiSend = root.querySelector<HTMLButtonElement>('#pop-ai-send')!
@@ -712,16 +701,24 @@ export function mount(root: HTMLElement): void {
     aiLogEl.scrollTop = aiLogEl.scrollHeight
   }
 
+  const geminiModelIds = new Set(GOOGLE_AI_STUDIO_GEMINI_MODELS.map((m) => m.id))
+  for (const m of GOOGLE_AI_STUDIO_GEMINI_MODELS) {
+    const opt = document.createElement('option')
+    opt.value = m.id
+    opt.textContent = m.label
+    aiModelSelect.appendChild(opt)
+  }
+
   const aiStored = readAiSettingsFromStorage()
-  if (aiStored.endpoint) aiEndpointInput.value = aiStored.endpoint
-  else if (import.meta.env.VITE_POP_AI_URL) aiEndpointInput.value = import.meta.env.VITE_POP_AI_URL
+  let initialModel =
+    aiStored.model || (import.meta.env.VITE_POP_AI_MODEL as string | undefined) || defaultGeminiModelId()
+  if (!geminiModelIds.has(initialModel)) initialModel = defaultGeminiModelId()
+  aiModelSelect.value = initialModel
   if (aiStored.apiKey) aiKeyInput.value = aiStored.apiKey
   else if (import.meta.env.VITE_POP_AI_KEY) aiKeyInput.value = import.meta.env.VITE_POP_AI_KEY
-  aiModelInput.value = aiStored.model || import.meta.env.VITE_POP_AI_MODEL || 'gpt-4o-mini'
 
-  aiEndpointInput.addEventListener('blur', () => writeAiEndpoint(aiEndpointInput.value))
   aiKeyInput.addEventListener('blur', () => writeAiKey(aiKeyInput.value))
-  aiModelInput.addEventListener('blur', () => writeAiModel(aiModelInput.value))
+  aiModelSelect.addEventListener('change', () => writeAiModel(aiModelSelect.value))
 
   btnRailInspector.addEventListener('click', () => {
     if (leftInspectorPinned) {
@@ -3275,23 +3272,15 @@ export function mount(root: HTMLElement): void {
   async function runAiDesign(): Promise<void> {
     const prompt = aiPromptTextarea.value.trim()
     if (!prompt) return
-    const endpoint = aiEndpointInput.value.trim()
+    const modelId = aiModelSelect.value.trim() || defaultGeminiModelId()
+    const endpoint = buildGeminiGenerateContentUrl(modelId)
     const apiKey = aiKeyInput.value.trim()
-    const model = (aiModelInput.value.trim() || import.meta.env.VITE_POP_AI_MODEL || 'gpt-4o-mini').trim()
-    if (!endpoint) {
-      appendAiLog(
-        'err',
-        'Set an API endpoint (OpenAI chat completions or Gemini generateContent), or define VITE_POP_AI_URL in .env.',
-      )
+    if (!apiKey) {
+      appendAiLog('err', 'Add your Google AI Studio API key under API connection.')
       return
     }
-    if (isGeminiGenerateContentEndpoint(endpoint) && !apiKey) {
-      appendAiLog('err', 'Gemini requires an API key in the API key field (X-goog-api-key).')
-      return
-    }
-    writeAiEndpoint(endpoint)
     writeAiKey(apiKey)
-    writeAiModel(model)
+    writeAiModel(modelId)
 
     const docJson = documentToV3Json(buildDocumentV3())
     const userContent = `Current document (PopDocumentV3 JSON):\n${docJson}\n\nUser request:\n${prompt}\n\nRespond with ONLY a JSON array of patch ops, or a single object {"ops":[...]}.`
@@ -3304,8 +3293,8 @@ export function mount(root: HTMLElement): void {
 
     const chat = await fetchDesignLlmReply({
       endpoint,
-      apiKey: apiKey || undefined,
-      model,
+      apiKey,
+      model: modelId,
       systemPrompt: buildDesignLlmSystemPrompt(),
       userContent,
       signal: aiAbort.signal,

@@ -979,6 +979,10 @@ body {
   margin-top: 0.35rem;
 }
 
+.pop-ai-settings .pop-panel-desc a {
+  color: var(--accent);
+}
+
 .pop-ai-log-msg {
   margin: 0 0 0.45rem;
   white-space: pre-wrap;
@@ -1038,7 +1042,8 @@ body {
   color: var(--muted);
 }
 
-.pop-ai-field-grid input {
+.pop-ai-field-grid input,
+.pop-ai-field-grid select {
   font: inherit;
   font-size: 0.78rem;
   padding: 0.32rem 0.4rem;

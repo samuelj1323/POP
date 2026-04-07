@@ -31,7 +31,7 @@ This repository is **Pop**, a browser-based SVG canvas editor (Svelte 5 + Vite +
 | `document.ts` | `PopDocumentV3`, `PopFrame`, `DesignTokens`, world bounds, migration helpers |
 | `persistence.ts` | localStorage keys `STORAGE_KEY_V1` … `V3`, load/save, `normalizeSceneNode` |
 | `patch.ts` | `PatchOp`, `applyPatch` — apply structured edits to `PopDocumentV3` (used by the Design assistant) |
-| `llm-design.ts` | `fetchDesignLlmReply` (OpenAI chat or Gemini `generateContent`), `buildDesignLlmSystemPrompt`, `parsePatchOpsFromLlmText`, AI settings in `localStorage` |
+| `llm-design.ts` | `fetchDesignLlmReply`, `buildGeminiGenerateContentUrl`, `GOOGLE_AI_STUDIO_GEMINI_MODELS`, `buildDesignLlmSystemPrompt`, `parsePatchOpsFromLlmText`, AI settings in `localStorage` |
 | `svg-export.ts` | SVG fragment generation, download |
 | `html-export.ts` | HTML export from frames |
 | `layout-geometry.ts` | Bounds, resize handles, hierarchy |
@@ -51,7 +51,7 @@ The in-app **Design assistant** (right column in `svg-studio.ts`, `pop-ai-*` ele
 2. **Model output**: The model must return **only JSON**: a JSON array of patch operations, or `{"ops":[...]}`. The system prompt is `buildDesignLlmSystemPrompt()` in `llm-design.ts` (allowed ops match `patch.ts`).
 3. **Apply**: `parsePatchOpsFromLlmText` → `applyPatch` → `applyDocumentV3` in `svg-studio.ts`, then the canvas re-renders and state persists as usual.
 
-**API**: `fetchDesignLlmReply` in `llm-design.ts` picks the wire format from the endpoint URL: **OpenAI-compatible** `POST …/chat/completions` (Bearer key), or **Google Gemini** `…/models/<id>:generateContent` on `generativelanguage.googleapis.com` (key as **`X-goog-api-key`**). **Configuration**: `localStorage` keys `pop-ai-endpoint`, `pop-ai-key`, `pop-ai-model`, or Vite env defaults **`VITE_POP_AI_URL`**, **`VITE_POP_AI_KEY`**, **`VITE_POP_AI_MODEL`** (see `.env.example`). Direct browser calls to some providers may be blocked by **CORS**; use a same-origin proxy if needed.
+**API**: The UI uses **Google Gemini** only: the endpoint URL is built with `buildGeminiGenerateContentUrl(modelId)`; the API key is sent as **`X-goog-api-key`**. `fetchDesignLlmReply` still supports an OpenAI-style URL if passed programmatically. **Configuration**: `localStorage` keys `pop-ai-key`, `pop-ai-model` (selected Gemini id), or Vite defaults **`VITE_POP_AI_KEY`**, **`VITE_POP_AI_MODEL`** (see `.env.example`). Direct browser calls may be blocked by **CORS**; use a same-origin proxy if needed.
 
 ## Conventions for changes
 
