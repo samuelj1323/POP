@@ -62,6 +62,8 @@ import {
 } from './studio/svg-export.ts'
 import { downloadHtml, exportFrameToHtml } from './studio/html-export.ts'
 
+/** POP editor UI (imperative DOM). Domain model: `src/studio/`. Repo context: `AGENTS.md`. */
+
 const POP_CLIPBOARD_VERSION = 1 as const
 const PASTE_OFFSET_WORLD = 10
 
@@ -86,6 +88,7 @@ function parsePopClipboard(raw: string): PopClipboardPayload | null {
   }
 }
 
+/** Attach the full editor UI and behavior to `root`. */
 export function mount(root: HTMLElement): void {
   let frames: PopFrame[] = [createDefaultFrame()]
   let activeFrameId = frames[0]!.id

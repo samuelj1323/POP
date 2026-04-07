@@ -1,0 +1,86 @@
+# POP — agent and LLM context
+
+This repository is **Pop**, a browser-based SVG canvas editor (Svelte 5 + Vite + TypeScript). The product name in the UI is **POP**. Users draw shapes, text, and images; export **SVG** or **HTML**.
+
+## Quick commands
+
+| Command | Purpose |
+|--------|---------|
+| `npm install` | Install dependencies |
+| `npm run dev` | Dev server (Vite) |
+| `npm run build` | Production build |
+| `npm run check` | `svelte-check` + TypeScript |
+
+## Entry and layout
+
+| File | Role |
+|------|------|
+| `index.html` | Mounts `#app`, loads `src/main.ts` |
+| `src/main.ts` | `mount(App, { target })` — Svelte entry |
+| `src/App.svelte` | Thin shell: `onMount` → `mount(host)` from `svg-studio.ts` |
+| `src/svg-studio.ts` | **Main editor**: imperative DOM (large file), `export function mount(root: HTMLElement)` |
+| `src/style.css` | Global styles |
+
+**Rule of thumb:** New UI that belongs in the chrome/canvas/toolbar usually lives in **`svg-studio.ts`** (or is extracted from it). New pure logic, types, and serialization live under **`src/studio/`**.
+
+## Domain model (`src/studio/`)
+
+| Module | Contents |
+|--------|----------|
+| `scene-types.ts` | `Tool`, `SceneNode` (rect, ellipse, text, image, group, instance), `ComponentDefinition`, `GroupLayout`, `HtmlExportRole` |
+| `document.ts` | `PopDocumentV3`, `PopFrame`, `DesignTokens`, world bounds, migration helpers |
+| `persistence.ts` | localStorage keys `STORAGE_KEY_V1` … `V3`, load/save, `normalizeSceneNode` |
+| `patch.ts` | Document patch helpers (if present) |
+| `svg-export.ts` | SVG fragment generation, download |
+| `html-export.ts` | HTML export from frames |
+| `layout-geometry.ts` | Bounds, resize handles, hierarchy |
+| `snap.ts` | Snapping |
+| `constants.ts` | e.g. `VIEW_W`/`VIEW_H` (default frame 960×540), grid, scale limits |
+| `id.ts` | `newId()` for nodes |
+| `math.ts` | `clamp` and small math helpers |
+| `color-palette.ts` | Palette / theme helpers |
+
+Current document version is **`PopDocumentV3`** (`v: 3`); persistence uses **`STORAGE_KEY_V3`**.
+
+## Conventions for changes
+
+- **Svelte 5**: runes (`$state`, etc.) in `.svelte` files; the studio itself is mostly vanilla TS + DOM in `svg-studio.ts`.
+- **Imports**: use `.ts` extensions in import paths where the codebase already does (e.g. `'./studio/constants.ts'`).
+- **Types**: extend `SceneNode` / `Tool` in `scene-types.ts` when adding node kinds or tools; thread through `persistence.ts` normalization and any switch statements in `svg-studio.ts` and exporters.
+- **Before adding parallel UI patterns**: search `svg-studio.ts` for existing buttons, panels, and class names (`pop-*`) and match them.
+
+## LLM prompt template (copy-paste)
+
+Use this when asking an LLM to implement a feature in this repo:
+
+```text
+You are working in the POP repo: a Svelte 5 + Vite + TypeScript SVG editor.
+
+Constraints:
+- Read AGENTS.md at the repo root for architecture.
+- Prefer editing src/studio/ for types and pure logic; svg-studio.ts for UI and canvas behavior (file is large—search before editing).
+- After changing types, run: npm run check
+- Match existing CSS class prefix pop-* and existing patterns in svg-studio.ts.
+
+Task:
+<describe the feature: user-visible behavior, edge cases, and any new types or tools>
+
+Deliver:
+- List of files changed
+- Brief summary of behavior
+```
+
+## Optional: “greenfield” generation prompt
+
+If generating a new screen or module from scratch:
+
+```text
+Stack: Svelte 5 (runes), Vite, TypeScript. Entry: src/main.ts → App.svelte.
+Studio editor is mounted via svg-studio.ts mount(). For new features, either extend src/studio/ types and wire in svg-studio.ts, or add a new .svelte component and import it from App.svelte if the feature is separate from the canvas.
+Follow existing patterns in src/style.css and pop-* class names.
+```
+
+## What not to assume
+
+- There is no separate `components/` UI library folder yet; the editor UI is concentrated in `svg-studio.ts`.
+- Raster images in SVG export are embedded as `<image>`; they are not auto-traced.
