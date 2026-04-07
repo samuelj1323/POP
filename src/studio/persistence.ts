@@ -152,13 +152,26 @@ export function normalizeSceneNode(x: unknown): SceneNode | null {
       }
       if (o.type === 'rect') {
         const rxRaw = n('rx') && Number.isFinite(o.rx as number) ? (o.rx as number) : 0
+        const fillToken = s('fillToken') ? (o.fillToken as string) : undefined
+        const strokeToken = s('strokeToken') ? (o.strokeToken as string) : undefined
         return {
           ...o,
           rx: Math.max(0, rxRaw),
           opacity: readOpacity(),
+          ...(fillToken ? { fillToken } : {}),
+          ...(strokeToken ? { strokeToken } : {}),
         } as unknown as SceneNode
       }
-      return { ...o, opacity: readOpacity() } as unknown as SceneNode
+      {
+        const fillToken = s('fillToken') ? (o.fillToken as string) : undefined
+        const strokeToken = s('strokeToken') ? (o.strokeToken as string) : undefined
+        return {
+          ...o,
+          opacity: readOpacity(),
+          ...(fillToken ? { fillToken } : {}),
+          ...(strokeToken ? { strokeToken } : {}),
+        } as unknown as SceneNode
+      }
     case 'text':
       if (!(n('x') && n('y') && n('width') && n('height') && s('content') && n('fontSize') && s('fill'))) {
         return null
@@ -176,6 +189,7 @@ export function normalizeSceneNode(x: unknown): SceneNode | null {
           n('lineHeight') && Number.isFinite(o.lineHeight as number) && (o.lineHeight as number) > 0
             ? (o.lineHeight as number)
             : 1.2
+        const fillToken = s('fillToken') ? (o.fillToken as string) : undefined
         return {
           ...o,
           opacity: readOpacity(),
@@ -183,6 +197,7 @@ export function normalizeSceneNode(x: unknown): SceneNode | null {
           fontWeight,
           letterSpacing,
           lineHeight,
+          ...(fillToken ? { fillToken } : {}),
         } as unknown as SceneNode
       }
     case 'image':

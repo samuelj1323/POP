@@ -60,7 +60,23 @@ import {
   serializeSceneSubtreeSvg,
   serializeSvgFromRoots,
 } from './studio/svg-export.ts'
+import {
+  resolvedFill,
+  resolvedStroke,
+  tokensToCssRootBlock,
+  tokensToJson,
+} from './studio/design-tokens.ts'
 import { downloadHtml, exportFrameToHtml } from './studio/html-export.ts'
+import {
+  buildDesignLlmSystemPrompt,
+  fetchOpenAiCompatibleChat,
+  parsePatchOpsFromLlmText,
+  readAiSettingsFromStorage,
+  writeAiEndpoint,
+  writeAiKey,
+  writeAiModel,
+} from './studio/llm-design.ts'
+import { applyPatch } from './studio/patch.ts'
 
 /** POP editor UI (imperative DOM). Domain model: `src/studio/`. Repo context: `AGENTS.md`. */
 
@@ -260,6 +276,16 @@ export function mount(root: HTMLElement): void {
                   <span class="pop-tb-grid-sub">All frames</span>
                 </button>
               </div>
+              <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Copy design tokens">
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ribbon-copy-tokens-json" title="Copy tokens as JSON">
+                  <span class="pop-tb-grid-title">tokens.json</span>
+                  <span class="pop-tb-grid-sub">Copy</span>
+                </button>
+                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ribbon-copy-css-vars" title="Copy :root CSS variables">
+                  <span class="pop-tb-grid-title">:root CSS</span>
+                  <span class="pop-tb-grid-sub">Copy</span>
+                </button>
+              </div>
             </div>
             <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-export">Export</span>
           </div>
@@ -394,6 +420,14 @@ export function mount(root: HTMLElement): void {
                   <input type="range" id="pop-rx" min="0" max="80" value="0" aria-label="Corner radius" />
                 </label>
               </div>
+              <div class="pop-token-bind-grid">
+                <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Fill token</span>
+                  <select id="pop-fill-token-ref" class="pop-comp-pick" aria-label="Bind fill color to a design token"></select>
+                </label>
+                <label class="pop-field pop-field-fs" id="pop-stroke-token-wrap"><span class="pop-field-lbl">Stroke token</span>
+                  <select id="pop-stroke-token-ref" class="pop-comp-pick" aria-label="Bind stroke color to a design token"></select>
+                </label>
+              </div>
             </div>
           </div>
           <div class="pop-props" id="pop-typography-props" hidden>
@@ -422,6 +456,26 @@ export function mount(root: HTMLElement): void {
               <label class="pop-field"><span class="pop-field-lbl">Pad</span><input type="number" id="pop-group-pad" class="pop-num" min="0" step="1" /></label>
             </div>
           </div>
+          <div class="pop-props" id="pop-design-tokens-props" tabindex="-1">
+            <h2 class="pop-panel-h">Design tokens</h2>
+            <p class="pop-panel-desc">
+              Export to code as <span class="pop-code">--pop-color-*</span>, <span class="pop-code">--pop-radius-*</span>, <span class="pop-code">--pop-space-*</span>. Use fill/stroke token picks above to keep layers tied to tokens in HTML export.
+            </p>
+            <h3 class="pop-panel-subh">Colors</h3>
+            <ul class="pop-token-list" id="pop-token-color-list"></ul>
+            <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-color-add">Add color</button>
+            <h3 class="pop-panel-subh">Radius</h3>
+            <ul class="pop-token-list" id="pop-token-radius-list"></ul>
+            <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-radius-add">Add radius</button>
+            <h3 class="pop-panel-subh">Space</h3>
+            <ul class="pop-token-list" id="pop-token-space-list"></ul>
+            <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-space-add">Add space</button>
+            <div class="pop-token-handoff" role="group" aria-label="Copy tokens for your codebase">
+              <button type="button" class="pop-btn" id="pop-copy-tokens-json">Copy tokens.json</button>
+              <button type="button" class="pop-btn" id="pop-download-tokens-json">Download tokens.json</button>
+              <button type="button" class="pop-btn" id="pop-copy-css-vars">Copy CSS variables</button>
+            </div>
+          </div>
           <div class="pop-props pop-props-tight">
             <div class="pop-symmetry">
               <label class="pop-check"><input type="checkbox" id="pop-guides" checked /><span>Guides &amp; snap</span></label>
@@ -448,6 +502,38 @@ export function mount(root: HTMLElement): void {
             <button type="button" class="pop-btn pop-zoom-dock-reset" id="pop-zoom-reset-dock" title="Reset zoom to 100% and pan">100%</button>
           </div>
         </div>
+        <aside class="pop-ai-pane" aria-label="AI design assistant">
+          <h2 class="pop-panel-h">Design assistant</h2>
+          <p class="pop-panel-desc">
+            Describe changes; the model must reply with JSON patch operations only. Use an OpenAI-compatible
+            <span class="pop-code">POST …/chat/completions</span> URL. Direct calls to OpenAI from the browser are often blocked by CORS—use a small proxy or DevTools extension if needed.
+          </p>
+          <div class="pop-ai-field-grid">
+            <label class="pop-field pop-field-fs">
+              <span class="pop-field-lbl">Endpoint</span>
+              <input type="url" id="pop-ai-endpoint" placeholder="https://api.openai.com/v1/chat/completions" spellcheck="false" autocomplete="off" />
+            </label>
+            <label class="pop-field pop-field-fs">
+              <span class="pop-field-lbl">API key</span>
+              <input type="password" id="pop-ai-key" placeholder="Optional if your proxy adds auth" autocomplete="off" />
+            </label>
+            <label class="pop-field pop-field-fs">
+              <span class="pop-field-lbl">Model</span>
+              <input type="text" id="pop-ai-model" spellcheck="false" autocomplete="off" />
+            </label>
+          </div>
+          <div class="pop-ai-log" id="pop-ai-log" role="log" aria-live="polite"></div>
+          <textarea
+            class="pop-ai-prompt"
+            id="pop-ai-prompt"
+            placeholder="Example: Add a muted purple rectangle at the bottom of frame 1 and bump default corner radius on selected rects."
+            aria-label="Design request for AI"
+          ></textarea>
+          <div class="pop-ai-actions">
+            <button type="button" class="pop-btn pop-primary" id="pop-ai-send">Apply with AI</button>
+            <span class="pop-hint" id="pop-ai-status"></span>
+          </div>
+        </aside>
       </div>
     </div>
   `
@@ -541,6 +627,295 @@ export function mount(root: HTMLElement): void {
   const selGroupLayout = root.querySelector<HTMLSelectElement>('#pop-group-layout')!
   const inpGroupGap = root.querySelector<HTMLInputElement>('#pop-group-gap')!
   const inpGroupPad = root.querySelector<HTMLInputElement>('#pop-group-pad')!
+  const fillTokenSelect = root.querySelector<HTMLSelectElement>('#pop-fill-token-ref')!
+  const strokeTokenSelect = root.querySelector<HTMLSelectElement>('#pop-stroke-token-ref')!
+  const strokeTokenWrap = root.querySelector<HTMLElement>('#pop-stroke-token-wrap')!
+  const tokenColorList = root.querySelector<HTMLUListElement>('#pop-token-color-list')!
+  const tokenRadiusList = root.querySelector<HTMLUListElement>('#pop-token-radius-list')!
+  const tokenSpaceList = root.querySelector<HTMLUListElement>('#pop-token-space-list')!
+  const btnTokenColorAdd = root.querySelector<HTMLButtonElement>('#pop-token-color-add')!
+  const btnTokenRadiusAdd = root.querySelector<HTMLButtonElement>('#pop-token-radius-add')!
+  const btnTokenSpaceAdd = root.querySelector<HTMLButtonElement>('#pop-token-space-add')!
+  const btnCopyTokensJson = root.querySelector<HTMLButtonElement>('#pop-copy-tokens-json')!
+  const btnDownloadTokensJson = root.querySelector<HTMLButtonElement>('#pop-download-tokens-json')!
+  const btnCopyCssVars = root.querySelector<HTMLButtonElement>('#pop-copy-css-vars')!
+  const btnRibbonCopyTokensJson = root.querySelector<HTMLButtonElement>('#pop-ribbon-copy-tokens-json')!
+  const btnRibbonCopyCssVars = root.querySelector<HTMLButtonElement>('#pop-ribbon-copy-css-vars')!
+  const aiEndpointInput = root.querySelector<HTMLInputElement>('#pop-ai-endpoint')!
+  const aiKeyInput = root.querySelector<HTMLInputElement>('#pop-ai-key')!
+  const aiModelInput = root.querySelector<HTMLInputElement>('#pop-ai-model')!
+  const aiLogEl = root.querySelector<HTMLElement>('#pop-ai-log')!
+  const aiPromptTextarea = root.querySelector<HTMLTextAreaElement>('#pop-ai-prompt')!
+  const btnAiSend = root.querySelector<HTMLButtonElement>('#pop-ai-send')!
+  const aiStatusEl = root.querySelector<HTMLElement>('#pop-ai-status')!
+
+  function appendAiLog(kind: 'user' | 'model' | 'err' | 'sys', text: string): void {
+    const p = document.createElement('p')
+    p.classList.add('pop-ai-log-msg')
+    if (kind === 'user') p.classList.add('pop-ai-log-msg-user')
+    else if (kind === 'err') p.classList.add('pop-ai-log-msg-err')
+    else p.classList.add('pop-ai-log-msg-model')
+    p.textContent = kind === 'sys' ? `POP: ${text}` : text
+    aiLogEl.appendChild(p)
+    aiLogEl.scrollTop = aiLogEl.scrollHeight
+  }
+
+  const aiStored = readAiSettingsFromStorage()
+  if (aiStored.endpoint) aiEndpointInput.value = aiStored.endpoint
+  else if (import.meta.env.VITE_POP_AI_URL) aiEndpointInput.value = import.meta.env.VITE_POP_AI_URL
+  if (aiStored.apiKey) aiKeyInput.value = aiStored.apiKey
+  else if (import.meta.env.VITE_POP_AI_KEY) aiKeyInput.value = import.meta.env.VITE_POP_AI_KEY
+  aiModelInput.value = aiStored.model || import.meta.env.VITE_POP_AI_MODEL || 'gpt-4o-mini'
+
+  aiEndpointInput.addEventListener('blur', () => writeAiEndpoint(aiEndpointInput.value))
+  aiKeyInput.addEventListener('blur', () => writeAiKey(aiKeyInput.value))
+  aiModelInput.addEventListener('blur', () => writeAiModel(aiModelInput.value))
+
+  let tokenUiSyncing = false
+
+  function ensureTokenBuckets(): void {
+    if (!tokens.colors) tokens.colors = {}
+    if (!tokens.radii) tokens.radii = {}
+    if (!tokens.space) tokens.space = {}
+  }
+
+  function syncColorTokenRefsOnRename(oldKey: string, newKey: string): void {
+    if (oldKey === newKey || !oldKey) return
+    const apply = (it: SceneNode): void => {
+      if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text') {
+        if (it.fillToken === oldKey) it.fillToken = newKey
+      }
+      if (it.type === 'rect' || it.type === 'ellipse') {
+        if (it.strokeToken === oldKey) it.strokeToken = newKey
+      }
+    }
+    for (const it of nodes.values()) apply(it)
+    for (const def of definitions.values()) {
+      for (const it of Object.values(def.nodes)) apply(it as SceneNode)
+    }
+  }
+
+  function renameColorTokenKey(oldKey: string, newKey: string): void {
+    ensureTokenBuckets()
+    const colors = tokens.colors!
+    if (!(oldKey in colors)) return
+    const v = colors[oldKey]!
+    delete colors[oldKey]
+    colors[newKey] = v
+    syncColorTokenRefsOnRename(oldKey, newKey)
+  }
+
+  function clearFillStrokeTokenRefs(key: string): void {
+    const apply = (it: SceneNode): void => {
+      if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text') {
+        if (it.fillToken === key) delete it.fillToken
+      }
+      if (it.type === 'rect' || it.type === 'ellipse') {
+        if (it.strokeToken === key) delete it.strokeToken
+      }
+    }
+    for (const it of nodes.values()) apply(it)
+    for (const def of definitions.values()) {
+      for (const it of Object.values(def.nodes)) apply(it as SceneNode)
+    }
+  }
+
+  function refreshFillStrokeTokenSelects(): void {
+    tokenUiSyncing = true
+    try {
+      ensureTokenBuckets()
+      const colorKeys = Object.keys(tokens.colors ?? {}).sort()
+      const rebuild = (sel: HTMLSelectElement, cur: string | undefined, mixed: boolean): void => {
+        sel.replaceChildren()
+        const o0 = document.createElement('option')
+        o0.value = ''
+        o0.textContent = mixed ? '— Mixed —' : '— None —'
+        sel.appendChild(o0)
+        for (const k of colorKeys) {
+          const o = document.createElement('option')
+          o.value = k
+          o.textContent = k
+          sel.appendChild(o)
+        }
+        if (mixed || cur === undefined || cur === '') sel.value = ''
+        else if (colorKeys.includes(cur)) sel.value = cur
+        else sel.value = ''
+      }
+
+      const sel = [...selected]
+      const fillLeaves = sel.filter((id) => ['rect', 'ellipse', 'text'].includes(nodes.get(id)?.type ?? ''))
+      let fillCur: string | undefined
+      let fillMixed = false
+      if (fillLeaves.length > 0) {
+        const fts = fillLeaves.map((id) => (nodes.get(id) as { fillToken?: string }).fillToken)
+        const defined = fts.filter((x): x is string => typeof x === 'string' && x.length > 0)
+        const u = [...new Set(defined)]
+        if (u.length === 1) fillCur = u[0]
+        else if (u.length > 1) fillMixed = true
+      }
+      rebuild(fillTokenSelect, fillCur, fillMixed)
+
+      const strokeLeaves = sel.filter((id) => ['rect', 'ellipse'].includes(nodes.get(id)?.type ?? ''))
+      let strokeCur: string | undefined
+      let strokeMixed = false
+      if (strokeLeaves.length > 0) {
+        const sts = strokeLeaves.map((id) => (nodes.get(id) as { strokeToken?: string }).strokeToken)
+        const defined = sts.filter((x): x is string => typeof x === 'string' && x.length > 0)
+        const u = [...new Set(defined)]
+        if (u.length === 1) strokeCur = u[0]
+        else if (u.length > 1) strokeMixed = true
+      }
+      rebuild(strokeTokenSelect, strokeCur, strokeMixed)
+    } finally {
+      tokenUiSyncing = false
+    }
+  }
+
+  function renderTokensPanel(): void {
+    ensureTokenBuckets()
+    const colors = tokens.colors!
+    const radii = tokens.radii!
+    const space = tokens.space!
+
+    tokenColorList.replaceChildren()
+    for (const [key, val] of Object.entries(colors).sort(([a], [b]) => a.localeCompare(b))) {
+      const li = document.createElement('li')
+      li.className = 'pop-token-row'
+      const keyInp = document.createElement('input')
+      keyInp.type = 'text'
+      keyInp.className = 'pop-num pop-token-key'
+      keyInp.value = key
+      keyInp.spellcheck = false
+      keyInp.autocomplete = 'off'
+      let prevKey = key
+      const colInp = document.createElement('input')
+      colInp.type = 'color'
+      colInp.className = 'pop-token-color'
+      colInp.value = normalizeHex6(val)
+      colInp.title = `Color for token “${key}”`
+      colInp.addEventListener('input', () => {
+        const k = keyInp.value.trim() || prevKey
+        colors[k] = colInp.value
+        schedulePersist()
+        commit()
+      })
+      keyInp.addEventListener('blur', () => {
+        const nk = keyInp.value.trim()
+        if (!nk || nk === prevKey) {
+          keyInp.value = prevKey
+          return
+        }
+        renameColorTokenKey(prevKey, nk)
+        prevKey = nk
+        renderTokensPanel()
+        refreshFillStrokeTokenSelects()
+        schedulePersist()
+        commit()
+      })
+      const rm = document.createElement('button')
+      rm.type = 'button'
+      rm.className = 'pop-btn pop-token-rm'
+      rm.textContent = 'Remove'
+      rm.title = `Remove token “${key}”`
+      rm.addEventListener('click', () => {
+        delete colors[prevKey]
+        clearFillStrokeTokenRefs(prevKey)
+        renderTokensPanel()
+        refreshFillStrokeTokenSelects()
+        schedulePersist()
+        commit()
+      })
+      li.appendChild(keyInp)
+      li.appendChild(colInp)
+      li.appendChild(rm)
+      tokenColorList.appendChild(li)
+    }
+
+    const numRow = (list: HTMLUListElement, bucket: Record<string, number>): void => {
+      list.replaceChildren()
+      for (const [key, val] of Object.entries(bucket).sort(([a], [b]) => a.localeCompare(b))) {
+        const li = document.createElement('li')
+        li.className = 'pop-token-row'
+        const keyInp = document.createElement('input')
+        keyInp.type = 'text'
+        keyInp.className = 'pop-num pop-token-key'
+        keyInp.value = key
+        keyInp.spellcheck = false
+        let prevKey = key
+        const num = document.createElement('input')
+        num.type = 'number'
+        num.className = 'pop-num pop-token-num'
+        num.min = '0'
+        num.step = '1'
+        num.value = String(Math.round(val))
+        num.addEventListener('input', () => {
+          const k = keyInp.value.trim() || prevKey
+          const v = parseFloat(num.value)
+          if (Number.isFinite(v) && v >= 0) bucket[k] = v
+          schedulePersist()
+        })
+        keyInp.addEventListener('blur', () => {
+          const nk = keyInp.value.trim()
+          if (!nk || nk === prevKey) {
+            keyInp.value = prevKey
+            return
+          }
+          const v = bucket[prevKey]!
+          delete bucket[prevKey]
+          bucket[nk] = v
+          prevKey = nk
+          renderTokensPanel()
+          schedulePersist()
+        })
+        const rm = document.createElement('button')
+        rm.type = 'button'
+        rm.className = 'pop-btn pop-token-rm'
+        rm.textContent = 'Remove'
+        rm.title = 'Remove token'
+        rm.addEventListener('click', () => {
+          delete bucket[prevKey]
+          renderTokensPanel()
+          schedulePersist()
+        })
+        li.appendChild(keyInp)
+        li.appendChild(num)
+        li.appendChild(rm)
+        list.appendChild(li)
+      }
+    }
+
+    numRow(tokenRadiusList, radii)
+    numRow(tokenSpaceList, space)
+  }
+
+  function copyTextToClipboard(text: string): void {
+    void navigator.clipboard.writeText(text).catch(() => {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.position = 'fixed'
+        ta.style.left = '-9999px'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      } catch {
+        /* ignore */
+      }
+    })
+  }
+
+  function downloadTextFile(text: string, filename: string, mime: string): void {
+    const blob = new Blob([text], { type: mime })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.rel = 'noopener'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   function updateFillSwatch(): void {
     fillSwatch.style.backgroundColor = fillInput.value
     fillSwatch.title = `Fill: ${fillInput.value}`
@@ -912,6 +1287,8 @@ export function mount(root: HTMLElement): void {
       if (!keepIds.has(k)) delete layerNames[k]
     }
     recomputeWorldSize()
+    renderTokensPanel()
+    refreshFillStrokeTokenSelects()
   }
 
   try {
@@ -975,6 +1352,8 @@ export function mount(root: HTMLElement): void {
   }
 
   updateBothSwatches()
+  renderTokensPanel()
+  refreshFillStrokeTokenSelects()
 
   let hintTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -1022,11 +1401,14 @@ export function mount(root: HTMLElement): void {
     fillInput.disabled = n > 0 && !anyFillTarget
     fillSwatch.disabled = fillInput.disabled
     fillStyleBlock.style.opacity = n > 0 && !anyFillTarget ? '0.45' : ''
+    fillTokenSelect.disabled = fillInput.disabled
 
     strokeStyleBlocks.hidden = n > 0 && !anyStrokeTarget
     strokeInput.disabled = n > 0 && !anyStrokeTarget
     strokeWInput.disabled = n > 0 && !anyStrokeTarget
     strokeSwatch.disabled = strokeInput.disabled
+    strokeTokenSelect.disabled = strokeInput.disabled
+    strokeTokenWrap.style.opacity = strokeInput.disabled ? '0.45' : ''
 
     opacityInput.disabled = n > 0 && !anyOpacityTarget
     rxWrap.style.display = anyRect ? '' : 'none'
@@ -1039,12 +1421,19 @@ export function mount(root: HTMLElement): void {
       opacityInput.value = String(Math.round(defaultOpacity * 100))
       rxInput.value = String(Math.round(defaultRx))
       updateBothSwatches()
+      refreshFillStrokeTokenSelects()
       return
     }
 
     const fillIds = sel.filter((id) => ['rect', 'ellipse', 'text'].includes(getNode(id)?.type ?? ''))
     if (fillIds.length > 0) {
-      const hexes = fillIds.map((id) => normalizeHex6((getNode(id) as { fill: string }).fill))
+      const hexes = fillIds.map((id) => {
+        const node = getNode(id)
+        if (!node || (node.type !== 'rect' && node.type !== 'ellipse' && node.type !== 'text')) {
+          return '#000000'
+        }
+        return normalizeHex6(resolvedFill(node, tokens))
+      })
       const first = hexes[0]!
       fillInput.value = first
       fillSwatch.title = hexes.every((h) => h === first) ? `Fill: ${first}` : `Mixed fills (${first} shown)`
@@ -1053,7 +1442,11 @@ export function mount(root: HTMLElement): void {
 
     const strokeIds = sel.filter((id) => ['rect', 'ellipse'].includes(getNode(id)?.type ?? ''))
     if (!strokeStyleBlocks.hidden && strokeIds.length > 0) {
-      const strokes = strokeIds.map((id) => normalizeHex6((getNode(id) as { stroke: string }).stroke))
+      const strokes = strokeIds.map((id) => {
+        const node = getNode(id)
+        if (!node || (node.type !== 'rect' && node.type !== 'ellipse')) return '#000000'
+        return normalizeHex6(resolvedStroke(node, tokens))
+      })
       const sw = strokeIds.map((id) => (getNode(id) as { strokeWidth: number }).strokeWidth)
       const s0 = strokes[0]!
       strokeInput.value = s0
@@ -1087,6 +1480,7 @@ export function mount(root: HTMLElement): void {
       if (!rxs.every((r) => r === r0)) rxInput.title = 'Mixed corner radius (first shown)'
       else rxInput.title = 'Corner radius'
     }
+    refreshFillStrokeTokenSelects()
   }
 
   function syncPropsFromSelection(): void {
@@ -2026,7 +2420,7 @@ export function mount(root: HTMLElement): void {
     if (!n) return ''
     if (n.type === 'group') {
       const inner = n.childIds
-        .map((cid) => serializeSceneSubtreeSvg(nodes, definitions, cid, `${ind}  `))
+        .map((cid) => serializeSceneSubtreeSvg(nodes, definitions, cid, `${ind}  `, tokens))
         .join('\n')
       return `${ind}<g>\n${inner}\n${ind}</g>`
     }
@@ -2035,10 +2429,10 @@ export function mount(root: HTMLElement): void {
       if (!def) return ''
       const sx = n.width / Math.max(1e-6, def.intrinsicW)
       const sy = n.height / Math.max(1e-6, def.intrinsicH)
-      const inner = serializeDefSubtreeSvg(def, def.rootId, `${ind}  `)
+      const inner = serializeDefSubtreeSvg(def, def.rootId, `${ind}  `, tokens)
       return `${ind}<g transform="scale(${sx} ${sy})">\n${inner}\n${ind}</g>`
     }
-    return `${ind}${buildSvgFragmentLeafLocal(n)}`
+    return `${ind}${buildSvgFragmentLeafLocal(n, tokens)}`
   }
 
   function hitTestWorld(wx: number, wy: number): string | null {
@@ -2551,7 +2945,7 @@ export function mount(root: HTMLElement): void {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
     g.setAttribute('transform', `translate(${n.x} ${n.y})`)
     const frag = document.createElementNS('http://www.w3.org/2000/svg', 'g')
-    frag.innerHTML = buildSvgFragmentLeafLocal(n)
+    frag.innerHTML = buildSvgFragmentLeafLocal(n, tokens)
     while (frag.firstChild) g.appendChild(frag.firstChild)
     parentG.appendChild(g)
   }
@@ -2589,7 +2983,7 @@ export function mount(root: HTMLElement): void {
     g.dataset.id = item.id
     g.setAttribute('transform', `translate(${item.x} ${item.y})`)
     const frag = document.createElementNS('http://www.w3.org/2000/svg', 'g')
-    frag.innerHTML = buildSvgFragmentLeafLocal(item)
+    frag.innerHTML = buildSvgFragmentLeafLocal(item, tokens)
     while (frag.firstChild) g.appendChild(frag.firstChild)
     parentG.appendChild(g)
   }
@@ -2804,6 +3198,92 @@ export function mount(root: HTMLElement): void {
     schedulePersist()
   }
 
+  let aiAbort: AbortController | null = null
+
+  async function runAiDesign(): Promise<void> {
+    const prompt = aiPromptTextarea.value.trim()
+    if (!prompt) return
+    const endpoint = aiEndpointInput.value.trim()
+    const apiKey = aiKeyInput.value.trim()
+    const model = (aiModelInput.value.trim() || import.meta.env.VITE_POP_AI_MODEL || 'gpt-4o-mini').trim()
+    if (!endpoint) {
+      appendAiLog(
+        'err',
+        'Set an API endpoint (OpenAI-compatible chat completions), or define VITE_POP_AI_URL in .env.',
+      )
+      return
+    }
+    writeAiEndpoint(endpoint)
+    writeAiKey(apiKey)
+    writeAiModel(model)
+
+    const docJson = documentToV3Json(buildDocumentV3())
+    const userContent = `Current document (PopDocumentV3 JSON):\n${docJson}\n\nUser request:\n${prompt}\n\nRespond with ONLY a JSON array of patch ops, or a single object {"ops":[...]}.`
+
+    aiAbort?.abort()
+    aiAbort = new AbortController()
+    btnAiSend.disabled = true
+    aiStatusEl.textContent = 'Waiting for model…'
+    appendAiLog('user', prompt)
+
+    const chat = await fetchOpenAiCompatibleChat({
+      endpoint,
+      apiKey: apiKey || undefined,
+      model,
+      messages: [
+        { role: 'system', content: buildDesignLlmSystemPrompt() },
+        { role: 'user', content: userContent },
+      ],
+      signal: aiAbort.signal,
+    })
+
+    btnAiSend.disabled = false
+    aiAbort = null
+    aiStatusEl.textContent = ''
+
+    if (!chat.ok) {
+      if (chat.error === 'aborted') return
+      appendAiLog('err', chat.error)
+      return
+    }
+
+    const parsed = parsePatchOpsFromLlmText(chat.content)
+    if (!parsed.ok) {
+      appendAiLog('err', parsed.error)
+      appendAiLog('model', chat.content.slice(0, 6000))
+      return
+    }
+
+    if (parsed.ops.length === 0) {
+      appendAiLog('sys', 'Model returned no operations.')
+      return
+    }
+
+    const patched = applyPatch(buildDocumentV3(), parsed.ops)
+    if (!patched.ok) {
+      appendAiLog('err', patched.error)
+      return
+    }
+
+    applyDocumentV3(patched.doc)
+    selected.clear()
+    commit()
+    syncViewportTransform()
+    updateZoomPctLabel()
+    appendAiLog('sys', `Applied ${parsed.ops.length} patch op(s).`)
+    aiPromptTextarea.value = ''
+  }
+
+  btnAiSend.addEventListener('click', () => {
+    void runAiDesign()
+  })
+  aiPromptTextarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault()
+      void runAiDesign()
+    }
+  })
+
   function clientToSvg(ev: PointerEvent): { x: number; y: number } {
     return clientToSvgCoords(ev.clientX, ev.clientY)
   }
@@ -2912,6 +3392,7 @@ export function mount(root: HTMLElement): void {
       const it = getNode(id)
       if (!it) continue
       if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text') {
+        delete it.fillToken
         it.fill = defaultFill
       }
     }
@@ -2924,11 +3405,99 @@ export function mount(root: HTMLElement): void {
     for (const id of selected) {
       const it = getNode(id)
       if (it && (it.type === 'rect' || it.type === 'ellipse')) {
+        delete it.strokeToken
         it.stroke = defaultStroke
       }
     }
     commit()
   })
+
+  fillTokenSelect.addEventListener('change', () => {
+    if (tokenUiSyncing) return
+    const v = fillTokenSelect.value || undefined
+    for (const id of selected) {
+      const it = getNode(id)
+      if (!it) continue
+      if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text') {
+        if (v) it.fillToken = v
+        else delete it.fillToken
+      }
+    }
+    syncStyleFromSelection()
+    commit()
+  })
+
+  strokeTokenSelect.addEventListener('change', () => {
+    if (tokenUiSyncing) return
+    const v = strokeTokenSelect.value || undefined
+    for (const id of selected) {
+      const it = getNode(id)
+      if (!it) continue
+      if (it.type === 'rect' || it.type === 'ellipse') {
+        if (v) it.strokeToken = v
+        else delete it.strokeToken
+      }
+    }
+    syncStyleFromSelection()
+    commit()
+  })
+
+  function handoffCopyTokensJson(): void {
+    copyTextToClipboard(tokensToJson(tokens))
+  }
+
+  function handoffCopyCssVars(): void {
+    copyTextToClipboard(tokensToCssRootBlock(tokens))
+  }
+
+  btnTokenColorAdd.addEventListener('click', () => {
+    ensureTokenBuckets()
+    let n = Object.keys(tokens.colors!).length + 1
+    let name = `color${n}`
+    while (tokens.colors![name]) {
+      n++
+      name = `color${n}`
+    }
+    tokens.colors![name] = '#7c6f9a'
+    renderTokensPanel()
+    refreshFillStrokeTokenSelects()
+    schedulePersist()
+    commit()
+  })
+
+  btnTokenRadiusAdd.addEventListener('click', () => {
+    ensureTokenBuckets()
+    let n = Object.keys(tokens.radii!).length + 1
+    let name = `radius${n}`
+    while (tokens.radii![name]) {
+      n++
+      name = `radius${n}`
+    }
+    tokens.radii![name] = 8
+    renderTokensPanel()
+    schedulePersist()
+  })
+
+  btnTokenSpaceAdd.addEventListener('click', () => {
+    ensureTokenBuckets()
+    let n = Object.keys(tokens.space!).length + 1
+    let name = `space${n}`
+    while (tokens.space![name]) {
+      n++
+      name = `space${n}`
+    }
+    tokens.space![name] = 16
+    renderTokensPanel()
+    schedulePersist()
+  })
+
+  btnCopyTokensJson.addEventListener('click', () => handoffCopyTokensJson())
+  btnRibbonCopyTokensJson.addEventListener('click', () => handoffCopyTokensJson())
+  btnDownloadTokensJson.addEventListener('click', () => {
+    downloadTextFile(tokensToJson(tokens), 'pop-tokens.json', 'application/json;charset=utf-8')
+  })
+  btnCopyCssVars.addEventListener('click', () => handoffCopyCssVars())
+  btnRibbonCopyCssVars.addEventListener('click', () => handoffCopyCssVars())
 
   strokeWInput.addEventListener('input', () => {
     syncChromeFromInputs()
@@ -3001,7 +3570,7 @@ ${parts}
   btnExportAll.addEventListener('click', () => {
     const f = getActiveFrame()
     downloadSvg(
-      serializeSvgFromRoots(roots(), nodes, definitions, f.width, f.height),
+      serializeSvgFromRoots(roots(), nodes, definitions, f.width, f.height, tokens),
       `pop-frame-${f.label.replace(/\s+/g, '-')}.svg`,
     )
   })

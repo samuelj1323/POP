@@ -1,4 +1,5 @@
 import type { DesignTokens, PopFrame } from './document.ts'
+import { resolveColorFromTokens, tokenSlug, tokensToCssRootBlock } from './design-tokens.ts'
 import { worldFrame } from './layout-geometry.ts'
 import type { ComponentDefinition, HtmlExportRole, SceneNode } from './scene-types.ts'
 
@@ -51,11 +52,12 @@ export function exportFrameToHtml(
   frame: PopFrame,
   nodes: Map<string, SceneNode>,
   definitions: Map<string, ComponentDefinition>,
-  _tokens: DesignTokens,
+  tokens: DesignTokens,
   options?: { title?: string },
 ): string {
   const title = escapeHtml(options?.title ?? frame.label)
-  const body = frame.rootIds.map((rid) => emitRoot(rid, frame, nodes, definitions)).join('\n')
+  const body = frame.rootIds.map((rid) => emitRoot(rid, frame, nodes, definitions, tokens)).join('\n')
+  const cssVars = tokensToCssRootBlock(tokens)
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -65,7 +67,8 @@ export function exportFrameToHtml(
   <title>${title}</title>
   <style>
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; background: #0f1117; color: #e8eaef; font-family: system-ui, sans-serif; }
+    ${cssVars}
+    body { margin: 0; min-height: 100vh; font-family: system-ui, sans-serif; }
     .pop-frame {
       position: relative;
       width: ${px(frame.width)};
@@ -81,7 +84,7 @@ export function exportFrameToHtml(
   </style>
 </head>
 <body>
-  <div class="pop-frame" data-pop-frame="${escapeHtml(frame.id)}">
+  <div class="pop-frame" data-pop-frame="${escapeHtml(frame.id)}" data-pop-frame-label="${escapeHtml(frame.label)}">
 ${body}
   </div>
 </body>
@@ -94,8 +97,9 @@ function emitRoot(
   frame: PopFrame,
   nodes: Map<string, SceneNode>,
   definitions: Map<string, ComponentDefinition>,
+  tokens: DesignTokens,
 ): string {
-  return emitNode(rootId, frame, nodes, definitions)
+  return emitNode(rootId, frame, nodes, definitions, tokens)
 }
 
 function emitNode(
@@ -103,6 +107,7 @@ function emitNode(
   frame: PopFrame,
   nodes: Map<string, SceneNode>,
   definitions: Map<string, ComponentDefinition>,
+  tokens: DesignTokens,
 ): string {
   const n = nodes.get(id)
   if (!n) return ''
@@ -111,14 +116,15 @@ function emitNode(
 
   const left = wf.x - frame.x
   const top = wf.y - frame.y
+  const popAttrs = ` data-pop-node="${escapeHtml(id)}" data-pop-kind="${escapeHtml(n.type)}"`
 
   if (n.type === 'instance') {
     const def = definitions.get(n.componentId)
     if (!def) return ''
     const sx = wf.width / Math.max(1e-6, def.intrinsicW)
     const sy = wf.height / Math.max(1e-6, def.intrinsicH)
-    const inner = emitDefAt(def, def.rootId, 0, 0)
-    return `<div class="pop-abs" style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};overflow:hidden"><div style="width:${px(def.intrinsicW)};height:${px(def.intrinsicH)};transform:scale(${sx},${sy});transform-origin:0 0">${inner}</div></div>`
+    const inner = emitDefAt(def, def.rootId, 0, 0, tokens)
+    return `<div class="pop-abs"${popAttrs} style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};overflow:hidden"><div style="width:${px(def.intrinsicW)};height:${px(def.intrinsicH)};transform:scale(${sx},${sy});transform-origin:0 0">${inner}</div></div>`
   }
 
   if (n.type === 'group') {
@@ -129,34 +135,42 @@ function emitNode(
       const isBtn = tag === 'button'
       const pad = px(layout.padding)
       const gap = px(layout.gap)
-      const common = `class="pop-abs pop-stack" style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};display:flex;flex-direction:${fd};gap:${gap};padding:${pad};box-sizing:border-box"`
-      const kids = n.childIds.map((cid) => emitNode(cid, frame, nodes, definitions)).join('\n')
+      const common = `class="pop-abs pop-stack"${popAttrs} style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};display:flex;flex-direction:${fd};gap:${gap};padding:${pad};box-sizing:border-box"`
+      const kids = n.childIds.map((cid) => emitNode(cid, frame, nodes, definitions, tokens)).join('\n')
       if (isBtn) {
         return `<button type="button" ${common}>${kids}</button>`
       }
       return `<${tag} ${common}>${kids}</${tag}>`
     }
     const tag = groupTag(n.exportRole)
-    const kids = n.childIds.map((cid) => emitNode(cid, frame, nodes, definitions)).join('\n')
+    const kids = n.childIds.map((cid) => emitNode(cid, frame, nodes, definitions, tokens)).join('\n')
     if (tag === 'button') {
-      return `<button type="button" class="pop-abs" style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};position:relative">${kids}</button>`
+      return `<button type="button" class="pop-abs"${popAttrs} style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};position:relative">${kids}</button>`
     }
-    return `<${tag} class="pop-abs" style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};position:relative">${kids}</${tag}>`
+    return `<${tag} class="pop-abs"${popAttrs} style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};position:relative">${kids}</${tag}>`
   }
 
   if (n.type === 'rect') {
-    const bg = rgbaFromHex(n.fill, n.opacity)
+    const fillCss = cssFillValue(n.fill, n.fillToken, n.opacity, tokens.colors)
     const border =
-      n.strokeWidth > 0 ? `${px(n.strokeWidth)} solid ${rgbaFromHex(n.stroke, n.opacity)}` : 'none'
+      n.strokeWidth > 0
+        ? `${px(n.strokeWidth)} solid ${cssStrokeValue(n.stroke, n.strokeToken, n.opacity, tokens.colors)}`
+        : 'none'
     const rx = n.rx > 0 ? `${px(Math.min(n.rx, n.width / 2, n.height / 2))}` : '0'
-    return `<div class="pop-abs" style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};background:${bg};border:${border};border-radius:${rx};opacity:${n.opacity}"></div>`
+    const fillTokAttr = n.fillToken ? ` data-pop-fill-token="${escapeHtml(n.fillToken)}"` : ''
+    const strokeTokAttr = n.strokeToken ? ` data-pop-stroke-token="${escapeHtml(n.strokeToken)}"` : ''
+    return `<div class="pop-abs"${popAttrs}${fillTokAttr}${strokeTokAttr} style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};background:${fillCss};border:${border};border-radius:${rx};opacity:${n.opacity}"></div>`
   }
 
   if (n.type === 'ellipse') {
-    const bg = rgbaFromHex(n.fill, n.opacity)
+    const fillCss = cssFillValue(n.fill, n.fillToken, n.opacity, tokens.colors)
     const border =
-      n.strokeWidth > 0 ? `${px(n.strokeWidth)} solid ${rgbaFromHex(n.stroke, n.opacity)}` : 'none'
-    return `<div class="pop-abs pop-ellipse" style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};background:${bg};border:${border};opacity:${n.opacity}"></div>`
+      n.strokeWidth > 0
+        ? `${px(n.strokeWidth)} solid ${cssStrokeValue(n.stroke, n.strokeToken, n.opacity, tokens.colors)}`
+        : 'none'
+    const fillTokAttr = n.fillToken ? ` data-pop-fill-token="${escapeHtml(n.fillToken)}"` : ''
+    const strokeTokAttr = n.strokeToken ? ` data-pop-stroke-token="${escapeHtml(n.strokeToken)}"` : ''
+    return `<div class="pop-abs pop-ellipse"${popAttrs}${fillTokAttr}${strokeTokAttr} style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};background:${fillCss};border:${border};opacity:${n.opacity}"></div>`
   }
 
   if (n.type === 'text') {
@@ -165,23 +179,57 @@ function emitNode(
     const fw = n.fontWeight
     const ls = px(n.letterSpacing)
     const lh = n.lineHeight
-    const col = rgbaFromHex(n.fill, n.opacity)
-    return `<div class="pop-abs" style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};font-family:${ff},sans-serif;font-size:${fs};font-weight:${fw};letter-spacing:${ls};line-height:${lh};color:${col};opacity:${n.opacity};white-space:pre-wrap;overflow:hidden">${escapeHtml(n.content)}</div>`
+    const col = cssFillValue(n.fill, n.fillToken, n.opacity, tokens.colors)
+    const fillTokAttr = n.fillToken ? ` data-pop-fill-token="${escapeHtml(n.fillToken)}"` : ''
+    return `<div class="pop-abs"${popAttrs}${fillTokAttr} style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};font-family:${ff},sans-serif;font-size:${fs};font-weight:${fw};letter-spacing:${ls};line-height:${lh};color:${col};opacity:${n.opacity};white-space:pre-wrap;overflow:hidden">${escapeHtml(n.content)}</div>`
   }
 
   if (n.type === 'image') {
-    return `<img class="pop-abs" alt="" src="${escapeHtml(n.href)}" style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};opacity:${n.opacity};object-fit:fill" />`
+    return `<img class="pop-abs" alt=""${popAttrs} src="${escapeHtml(n.href)}" style="left:${px(left)};top:${px(top)};width:${px(wf.width)};height:${px(wf.height)};opacity:${n.opacity};object-fit:fill" />`
   }
 
   return ''
 }
 
+function cssFillValue(
+  literal: string,
+  fillToken: string | undefined,
+  opacity: number,
+  colors: Record<string, string> | undefined,
+): string {
+  if (fillToken && colors?.[fillToken]) {
+    if (opacity >= 1) return `var(--pop-color-${tokenSlug(fillToken)})`
+    return `color-mix(in srgb, var(--pop-color-${tokenSlug(fillToken)}) ${Math.round(opacity * 100)}%, transparent)`
+  }
+  return rgbaFromHex(resolveColorFromTokens(literal, fillToken, colors), opacity)
+}
+
+function cssStrokeValue(
+  literal: string,
+  strokeToken: string | undefined,
+  opacity: number,
+  colors: Record<string, string> | undefined,
+): string {
+  if (strokeToken && colors?.[strokeToken]) {
+    if (opacity >= 1) return `var(--pop-color-${tokenSlug(strokeToken)})`
+    return `color-mix(in srgb, var(--pop-color-${tokenSlug(strokeToken)}) ${Math.round(opacity * 100)}%, transparent)`
+  }
+  return rgbaFromHex(resolveColorFromTokens(literal, strokeToken, colors), opacity)
+}
+
 /** Render definition subtree; parent origin so node world origin is (parentX+n.x, parentY+n.y). */
-function emitDefAt(def: ComponentDefinition, id: string, parentX: number, parentY: number): string {
+function emitDefAt(
+  def: ComponentDefinition,
+  id: string,
+  parentX: number,
+  parentY: number,
+  tokens: DesignTokens,
+): string {
   const n = def.nodes[id]
   if (!n) return ''
   const ox = parentX + n.x
   const oy = parentY + n.y
+  const popAttrs = ` data-pop-def="1" data-pop-kind="${escapeHtml(n.type)}"`
 
   if (n.type === 'group') {
     const layout = n.layout
@@ -189,33 +237,38 @@ function emitDefAt(def: ComponentDefinition, id: string, parentX: number, parent
       const fd = layout.direction === 'horizontal' ? 'row' : 'column'
       const pad = px(layout.padding)
       const gap = px(layout.gap)
-      const kids = n.childIds.map((cid) => emitDefAt(def, cid, ox, oy)).join('\n')
-      return `<div class="pop-stack" style="position:absolute;left:${px(ox)};top:${px(oy)};display:flex;flex-direction:${fd};gap:${gap};padding:${pad};width:${px(n.width)};height:${px(n.height)};box-sizing:border-box">${kids}</div>`
+      const kids = n.childIds.map((cid) => emitDefAt(def, cid, ox, oy, tokens)).join('\n')
+      return `<div class="pop-stack"${popAttrs} style="position:absolute;left:${px(ox)};top:${px(oy)};display:flex;flex-direction:${fd};gap:${gap};padding:${pad};width:${px(n.width)};height:${px(n.height)};box-sizing:border-box">${kids}</div>`
     }
-    const kids = n.childIds.map((cid) => emitDefAt(def, cid, ox, oy)).join('\n')
-    return `<div style="position:absolute;left:${px(ox)};top:${px(oy)};width:${px(n.width)};height:${px(n.height)};position:relative">${kids}</div>`
+    const kids = n.childIds.map((cid) => emitDefAt(def, cid, ox, oy, tokens)).join('\n')
+    return `<div${popAttrs} style="position:absolute;left:${px(ox)};top:${px(oy)};width:${px(n.width)};height:${px(n.height)};position:relative">${kids}</div>`
   }
 
   if (n.type === 'rect') {
-    const bg = rgbaFromHex(n.fill, n.opacity)
+    const bg = cssFillValue(n.fill, n.fillToken, n.opacity, tokens.colors)
     const border =
-      n.strokeWidth > 0 ? `${px(n.strokeWidth)} solid ${rgbaFromHex(n.stroke, n.opacity)}` : 'none'
+      n.strokeWidth > 0
+        ? `${px(n.strokeWidth)} solid ${cssStrokeValue(n.stroke, n.strokeToken, n.opacity, tokens.colors)}`
+        : 'none'
     const rx = n.rx > 0 ? `${px(Math.min(n.rx, n.width / 2, n.height / 2))}` : '0'
-    return `<div style="position:absolute;left:${px(ox)};top:${px(oy)};width:${px(n.width)};height:${px(n.height)};background:${bg};border:${border};border-radius:${rx}"></div>`
+    return `<div${popAttrs} style="position:absolute;left:${px(ox)};top:${px(oy)};width:${px(n.width)};height:${px(n.height)};background:${bg};border:${border};border-radius:${rx};opacity:${n.opacity}"></div>`
   }
   if (n.type === 'ellipse') {
-    const bg = rgbaFromHex(n.fill, n.opacity)
+    const bg = cssFillValue(n.fill, n.fillToken, n.opacity, tokens.colors)
     const border =
-      n.strokeWidth > 0 ? `${px(n.strokeWidth)} solid ${rgbaFromHex(n.stroke, n.opacity)}` : 'none'
-    return `<div class="pop-ellipse" style="position:absolute;left:${px(ox)};top:${px(oy)};width:${px(n.width)};height:${px(n.height)};background:${bg};border:${border}"></div>`
+      n.strokeWidth > 0
+        ? `${px(n.strokeWidth)} solid ${cssStrokeValue(n.stroke, n.strokeToken, n.opacity, tokens.colors)}`
+        : 'none'
+    return `<div class="pop-ellipse"${popAttrs} style="position:absolute;left:${px(ox)};top:${px(oy)};width:${px(n.width)};height:${px(n.height)};background:${bg};border:${border};opacity:${n.opacity}"></div>`
   }
   if (n.type === 'text') {
     const ff = escapeHtml(n.fontFamily)
     const fs = px(n.fontSize)
-    return `<div style="position:absolute;left:${px(ox)};top:${px(oy)};width:${px(n.width)};height:${px(n.height)};font-family:${ff},sans-serif;font-size:${fs};font-weight:${n.fontWeight};letter-spacing:${px(n.letterSpacing)};line-height:${n.lineHeight};color:${rgbaFromHex(n.fill, n.opacity)};white-space:pre-wrap;overflow:hidden">${escapeHtml(n.content)}</div>`
+    const col = cssFillValue(n.fill, n.fillToken, n.opacity, tokens.colors)
+    return `<div${popAttrs} style="position:absolute;left:${px(ox)};top:${px(oy)};width:${px(n.width)};height:${px(n.height)};font-family:${ff},sans-serif;font-size:${fs};font-weight:${n.fontWeight};letter-spacing:${px(n.letterSpacing)};line-height:${n.lineHeight};color:${col};opacity:${n.opacity};white-space:pre-wrap;overflow:hidden">${escapeHtml(n.content)}</div>`
   }
   if (n.type === 'image') {
-    return `<img alt="" src="${escapeHtml(n.href)}" style="position:absolute;left:${px(ox)};top:${px(oy)};width:${px(n.width)};height:${px(n.height)};object-fit:fill;opacity:${n.opacity}" />`
+    return `<img alt=""${popAttrs} src="${escapeHtml(n.href)}" style="position:absolute;left:${px(ox)};top:${px(oy)};width:${px(n.width)};height:${px(n.height)};object-fit:fill;opacity:${n.opacity}" />`
   }
   return ''
 }

@@ -30,7 +30,10 @@ export type SceneLeaf =
       width: number
       height: number
       fill: string
+      /** When set, fill resolves from `DesignTokens.colors[fillToken]` with fallback to `fill`. */
+      fillToken?: string
       stroke: string
+      strokeToken?: string
       strokeWidth: number
       rx: number
       opacity: number
@@ -42,7 +45,9 @@ export type SceneLeaf =
       width: number
       height: number
       fill: string
+      fillToken?: string
       stroke: string
+      strokeToken?: string
       strokeWidth: number
       opacity: number
     })
@@ -55,6 +60,7 @@ export type SceneLeaf =
       content: string
       fontSize: number
       fill: string
+      fillToken?: string
       opacity: number
       /** CSS font-family stack */
       fontFamily: string
