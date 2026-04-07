@@ -30,7 +30,8 @@ This repository is **Pop**, a browser-based SVG canvas editor (Svelte 5 + Vite +
 | `scene-types.ts` | `Tool`, `SceneNode` (rect, ellipse, text, image, group, instance), `ComponentDefinition`, `GroupLayout`, `HtmlExportRole` |
 | `document.ts` | `PopDocumentV3`, `PopFrame`, `DesignTokens`, world bounds, migration helpers |
 | `persistence.ts` | localStorage keys `STORAGE_KEY_V1` … `V3`, load/save, `normalizeSceneNode` |
-| `patch.ts` | Document patch helpers (if present) |
+| `patch.ts` | `PatchOp`, `applyPatch` — apply structured edits to `PopDocumentV3` (used by the Design assistant) |
+| `llm-design.ts` | OpenAI-compatible chat client, `buildDesignLlmSystemPrompt`, `parsePatchOpsFromLlmText`, AI settings in `localStorage` |
 | `svg-export.ts` | SVG fragment generation, download |
 | `html-export.ts` | HTML export from frames |
 | `layout-geometry.ts` | Bounds, resize handles, hierarchy |
@@ -41,6 +42,16 @@ This repository is **Pop**, a browser-based SVG canvas editor (Svelte 5 + Vite +
 | `color-palette.ts` | Palette / theme helpers |
 
 Current document version is **`PopDocumentV3`** (`v: 3`); persistence uses **`STORAGE_KEY_V3`**.
+
+## Design assistant (LLM ↔ canvas)
+
+The in-app **Design assistant** (right column in `svg-studio.ts`, `pop-ai-*` elements) connects an LLM to the live document:
+
+1. **Send context**: The current document is serialized with `documentToV3Json(buildDocumentV3())` and sent with the user’s natural-language request.
+2. **Model output**: The model must return **only JSON**: a JSON array of patch operations, or `{"ops":[...]}`. The system prompt is `buildDesignLlmSystemPrompt()` in `llm-design.ts` (allowed ops match `patch.ts`).
+3. **Apply**: `parsePatchOpsFromLlmText` → `applyPatch` → `applyDocumentV3` in `svg-studio.ts`, then the canvas re-renders and state persists as usual.
+
+**API**: An OpenAI-compatible `POST …/chat/completions` URL (`fetchOpenAiCompatibleChat` in `llm-design.ts`). **Configuration**: `localStorage` keys `pop-ai-endpoint`, `pop-ai-key`, `pop-ai-model`, or Vite env defaults **`VITE_POP_AI_URL`**, **`VITE_POP_AI_KEY`**, **`VITE_POP_AI_MODEL`** (see `.env.example`). Direct browser calls to some providers may be blocked by **CORS**; use a same-origin proxy if needed.
 
 ## Conventions for changes
 
