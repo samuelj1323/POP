@@ -1,5 +1,14 @@
-import type { CanvasItem, ComponentDefinition, DefNode, SceneNode } from './scene-types.ts'
+import { clamp } from './math.ts'
+import type {
+  CanvasItem,
+  ComponentDefinition,
+  DefNode,
+  GroupLayout,
+  SceneGroup,
+  SceneNode,
+} from './scene-types.ts'
 
+export const STORAGE_KEY_V3 = 'pop-studio-state-v3'
 export const STORAGE_KEY_V2 = 'pop-studio-state-v2'
 export const STORAGE_KEY_V1 = 'pop-studio-state-v1'
 
@@ -58,62 +67,145 @@ export function isValidCanvasItem(x: unknown): x is CanvasItem {
   }
 }
 
-function isValidSceneNode(x: unknown): x is SceneNode {
-  if (!x || typeof x !== 'object') return false
+/** Accepts stored JSON (possibly missing `rx` / `opacity`) and returns a fully normalized scene node. */
+export function normalizeSceneNode(x: unknown): SceneNode | null {
+  if (!x || typeof x !== 'object') return null
   const o = x as Record<string, unknown>
-  if (typeof o.id !== 'string' || typeof o.type !== 'string') return false
+  if (typeof o.id !== 'string' || typeof o.type !== 'string') return null
   const n = (k: string) => typeof o[k] === 'number'
   const s = (k: string) => typeof o[k] === 'string'
   const parentOk = o.parentId === null || typeof o.parentId === 'string'
-  if (!parentOk) return false
+  if (!parentOk) return null
+
+  const readOpacity = (): number => {
+    if (n('opacity') && Number.isFinite(o.opacity as number)) return clamp(o.opacity as number, 0, 1)
+    return 1
+  }
+
   switch (o.type) {
     case 'group':
-      return (
-        n('x') &&
-        n('y') &&
-        n('width') &&
-        n('height') &&
-        Array.isArray(o.childIds) &&
-        (o.childIds as unknown[]).every((c) => typeof c === 'string')
-      )
+      if (
+        !(
+          n('x') &&
+          n('y') &&
+          n('width') &&
+          n('height') &&
+          Array.isArray(o.childIds) &&
+          (o.childIds as unknown[]).every((c) => typeof c === 'string')
+        )
+      ) {
+        return null
+      }
+      {
+        const base = { ...o } as Record<string, unknown>
+        const layoutRaw = base.layout
+        let layout: GroupLayout | undefined
+        if (layoutRaw && typeof layoutRaw === 'object') {
+          const L = layoutRaw as Record<string, unknown>
+          if (L.type === 'none') layout = { type: 'none' }
+          else if (
+            L.type === 'stack' &&
+            (L.direction === 'horizontal' || L.direction === 'vertical') &&
+            typeof L.gap === 'number' &&
+            typeof L.padding === 'number'
+          ) {
+            layout = {
+              type: 'stack',
+              direction: L.direction,
+              gap: L.gap,
+              padding: L.padding,
+            }
+          }
+        }
+        const exportRoleRaw = base.exportRole
+        const exportRole =
+          typeof exportRoleRaw === 'string' &&
+          ['auto', 'div', 'button', 'section', 'main', 'header', 'footer', 'nav', 'card'].includes(
+            exportRoleRaw,
+          )
+            ? (exportRoleRaw as SceneGroup['exportRole'])
+            : undefined
+        const g: SceneGroup = {
+          ...(base as unknown as SceneGroup),
+          ...(layout ? { layout } : {}),
+          ...(exportRole ? { exportRole } : {}),
+        }
+        return g as unknown as SceneNode
+      }
     case 'instance':
-      return n('x') && n('y') && n('width') && n('height') && s('componentId')
+      if (!(n('x') && n('y') && n('width') && n('height') && s('componentId'))) return null
+      return o as unknown as SceneNode
     case 'rect':
     case 'ellipse':
-      return (
-        n('x') &&
-        n('y') &&
-        n('width') &&
-        n('height') &&
-        s('fill') &&
-        s('stroke') &&
-        typeof o.strokeWidth === 'number'
-      )
+      if (
+        !(
+          n('x') &&
+          n('y') &&
+          n('width') &&
+          n('height') &&
+          s('fill') &&
+          s('stroke') &&
+          typeof o.strokeWidth === 'number'
+        )
+      ) {
+        return null
+      }
+      if (o.type === 'rect') {
+        const rxRaw = n('rx') && Number.isFinite(o.rx as number) ? (o.rx as number) : 0
+        const fillToken = s('fillToken') ? (o.fillToken as string) : undefined
+        const strokeToken = s('strokeToken') ? (o.strokeToken as string) : undefined
+        return {
+          ...o,
+          rx: Math.max(0, rxRaw),
+          opacity: readOpacity(),
+          ...(fillToken ? { fillToken } : {}),
+          ...(strokeToken ? { strokeToken } : {}),
+        } as unknown as SceneNode
+      }
+      {
+        const fillToken = s('fillToken') ? (o.fillToken as string) : undefined
+        const strokeToken = s('strokeToken') ? (o.strokeToken as string) : undefined
+        return {
+          ...o,
+          opacity: readOpacity(),
+          ...(fillToken ? { fillToken } : {}),
+          ...(strokeToken ? { strokeToken } : {}),
+        } as unknown as SceneNode
+      }
     case 'text':
-      return n('x') && n('y') && n('width') && n('height') && s('content') && n('fontSize') && s('fill')
+      if (!(n('x') && n('y') && n('width') && n('height') && s('content') && n('fontSize') && s('fill'))) {
+        return null
+      }
+      {
+        const fontFamily =
+          s('fontFamily') && typeof o.fontFamily === 'string' ? o.fontFamily : 'system-ui, sans-serif'
+        const fontWeight =
+          n('fontWeight') && Number.isFinite(o.fontWeight as number)
+            ? Math.round(clamp(o.fontWeight as number, 100, 900))
+            : 400
+        const letterSpacing =
+          n('letterSpacing') && Number.isFinite(o.letterSpacing as number) ? (o.letterSpacing as number) : 0
+        const lineHeight =
+          n('lineHeight') && Number.isFinite(o.lineHeight as number) && (o.lineHeight as number) > 0
+            ? (o.lineHeight as number)
+            : 1.2
+        const fillToken = s('fillToken') ? (o.fillToken as string) : undefined
+        return {
+          ...o,
+          opacity: readOpacity(),
+          fontFamily,
+          fontWeight,
+          letterSpacing,
+          lineHeight,
+          ...(fillToken ? { fillToken } : {}),
+        } as unknown as SceneNode
+      }
     case 'image':
-      return n('x') && n('y') && n('width') && n('height') && s('href')
+      if (!(n('x') && n('y') && n('width') && n('height') && s('href'))) return null
+      return { ...o, opacity: readOpacity() } as unknown as SceneNode
     default:
-      return false
+      return null
   }
-}
-
-function isValidDefNode(x: unknown): x is DefNode {
-  return isValidSceneNode(x) && (x as SceneNode).type !== 'instance'
-}
-
-function isValidComponentDefinition(x: unknown): x is ComponentDefinition {
-  if (!x || typeof x !== 'object') return false
-  const o = x as Record<string, unknown>
-  if (typeof o.id !== 'string' || typeof o.name !== 'string') return false
-  if (typeof o.rootId !== 'string') return false
-  if (typeof o.intrinsicW !== 'number' || typeof o.intrinsicH !== 'number') return false
-  if (!o.nodes || typeof o.nodes !== 'object') return false
-  const nodes = o.nodes as Record<string, unknown>
-  for (const k of Object.keys(nodes)) {
-    if (!isValidDefNode(nodes[k])) return false
-  }
-  return true
 }
 
 export function migrateV1ToScene(items: CanvasItem[]): { rootIds: string[]; nodes: Map<string, SceneNode> } {
@@ -131,6 +223,8 @@ export function migrateV1ToScene(items: CanvasItem[]): { rootIds: string[]; node
         fill: it.fill,
         stroke: it.stroke,
         strokeWidth: it.strokeWidth,
+        rx: 0,
+        opacity: 1,
       })
     } else if (it.type === 'ellipse') {
       nodeMap.set(it.id, {
@@ -143,6 +237,7 @@ export function migrateV1ToScene(items: CanvasItem[]): { rootIds: string[]; node
         fill: it.fill,
         stroke: it.stroke,
         strokeWidth: it.strokeWidth,
+        opacity: 1,
       })
     } else if (it.type === 'text') {
       nodeMap.set(it.id, {
@@ -155,6 +250,11 @@ export function migrateV1ToScene(items: CanvasItem[]): { rootIds: string[]; node
         content: it.content,
         fontSize: it.fontSize,
         fill: it.fill,
+        opacity: 1,
+        fontFamily: 'system-ui, sans-serif',
+        fontWeight: 400,
+        letterSpacing: 0,
+        lineHeight: 1.2,
       })
     } else {
       nodeMap.set(it.id, {
@@ -165,6 +265,7 @@ export function migrateV1ToScene(items: CanvasItem[]): { rootIds: string[]; node
         width: it.width,
         height: it.height,
         href: it.href,
+        opacity: 1,
       })
     }
     return it.id
@@ -172,11 +273,11 @@ export function migrateV1ToScene(items: CanvasItem[]): { rootIds: string[]; node
   return { rootIds, nodes: nodeMap }
 }
 
-export function recordToNodes(r: Record<string, SceneNode>): Map<string, SceneNode> {
+export function recordToNodes(r: Record<string, unknown>): Map<string, SceneNode> {
   const m = new Map<string, SceneNode>()
   for (const k of Object.keys(r)) {
-    const n = r[k]
-    if (n && isValidSceneNode(n)) m.set(k, n)
+    const n = normalizeSceneNode(r[k])
+    if (n) m.set(k, n)
   }
   return m
 }
@@ -187,11 +288,36 @@ export function nodesToRecord(nodes: Map<string, SceneNode>): Record<string, Sce
   return rec
 }
 
-export function recordToDefs(r: Record<string, ComponentDefinition>): Map<string, ComponentDefinition> {
+export function recordToDefs(r: Record<string, unknown>): Map<string, ComponentDefinition> {
   const m = new Map<string, ComponentDefinition>()
   for (const k of Object.keys(r)) {
-    const d = r[k]
-    if (d && isValidComponentDefinition(d)) m.set(k, d)
+    const entry = r[k]
+    if (!entry || typeof entry !== 'object') continue
+    const def = entry as ComponentDefinition
+    if (
+      typeof def.id !== 'string' ||
+      typeof def.name !== 'string' ||
+      typeof def.rootId !== 'string' ||
+      typeof def.intrinsicW !== 'number' ||
+      typeof def.intrinsicH !== 'number' ||
+      !def.nodes ||
+      typeof def.nodes !== 'object'
+    ) {
+      continue
+    }
+    const rawNodes = def.nodes as Record<string, unknown>
+    const newNodes: Record<string, DefNode> = {}
+    let ok = true
+    for (const nk of Object.keys(rawNodes)) {
+      const nn = normalizeSceneNode(rawNodes[nk])
+      if (!nn || nn.type === 'instance') {
+        ok = false
+        break
+      }
+      newNodes[nk] = nn as DefNode
+    }
+    if (!ok || !newNodes[def.rootId]) continue
+    m.set(k, { ...def, nodes: newNodes })
   }
   return m
 }
