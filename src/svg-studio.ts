@@ -82,6 +82,23 @@ import { applyPatch } from './studio/patch.ts'
 
 const POP_CLIPBOARD_VERSION = 1 as const
 const PASTE_OFFSET_WORLD = 10
+const STORAGE_KEY_LEFT_INSPECTOR_PINNED = 'pop-left-inspector-pinned'
+
+function readLeftInspectorPinned(): boolean {
+  try {
+    return localStorage.getItem(STORAGE_KEY_LEFT_INSPECTOR_PINNED) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeLeftInspectorPinned(v: boolean): void {
+  try {
+    localStorage.setItem(STORAGE_KEY_LEFT_INSPECTOR_PINNED, v ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+}
 
 type PopClipboardPayload = {
   popClipboard: typeof POP_CLIPBOARD_VERSION
@@ -172,6 +189,8 @@ export function mount(root: HTMLElement): void {
   let viewTx = 0
   let viewTy = 0
   let viewScale = 1
+  let leftInspectorPeek = false
+  let leftInspectorPinned = readLeftInspectorPinned()
 
   const dragState: {
     active: boolean
@@ -205,284 +224,278 @@ export function mount(root: HTMLElement): void {
 
   root.innerHTML = `
     <div class="pop-app">
-      <div class="pop-app-chrome">
-        <header class="pop-chrome-titlebar">
-          <div class="pop-chrome-title-cluster">
-            <h1 class="pop-title">POP</h1>
-            <p class="pop-sub" title="Draw on the canvas, add images, then export SVG. Raster images become &lt;image&gt; in the SVG (embedded), not auto-traced.">Shapes, text &amp; images · export SVG/HTML</p>
-          </div>
-        </header>
-        <div class="pop-chrome-ribbon" role="toolbar" aria-label="Editor toolbar">
-          <div class="pop-ribbon-group" aria-labelledby="pop-ribbon-lbl-tools">
-            <div class="pop-ribbon-group-main pop-ribbon-tools-row" id="pop-tb-tools-panel" role="group" aria-label="Drawing tools">
-              <button type="button" class="pop-btn pop-tool pop-ribbon-tool-btn" data-tool="select" aria-pressed="true" title="Move and resize">Select</button>
-              <button type="button" class="pop-btn pop-tool pop-ribbon-tool-btn" data-tool="rect" aria-pressed="false" title="Draw a rectangle">Rectangle</button>
-              <button type="button" class="pop-btn pop-tool pop-ribbon-tool-btn" data-tool="ellipse" aria-pressed="false" title="Draw an ellipse">Ellipse</button>
-              <button type="button" class="pop-btn pop-tool pop-ribbon-tool-btn" data-tool="text" aria-pressed="false" title="Place text">Text</button>
-              <button type="button" class="pop-btn pop-tool pop-ribbon-tool-btn" data-tool="image" aria-pressed="false" title="Embed a raster image">Image</button>
+      <header class="pop-chrome-min" role="banner">
+        <div class="pop-chrome-min-inner">
+          <h1 class="pop-title">POP</h1>
+          <p class="pop-sub" title="Draw on the canvas, add images, then export SVG. Raster images become &lt;image&gt; in the SVG (embedded), not auto-traced.">Shapes, text &amp; images · export SVG/HTML</p>
+        </div>
+      </header>
+      <div class="pop-main">
+        <div class="pop-left-shell" id="pop-left-shell">
+          <nav class="pop-left-rail" aria-label="Tools and document">
+            <div class="pop-left-rail-tools" role="toolbar" aria-label="Drawing tools">
+              <button type="button" class="pop-btn pop-tool pop-left-rail-tool" data-tool="select" aria-pressed="true" title="Move and resize">Sel</button>
+              <button type="button" class="pop-btn pop-tool pop-left-rail-tool" data-tool="rect" aria-pressed="false" title="Draw a rectangle">Rect</button>
+              <button type="button" class="pop-btn pop-tool pop-left-rail-tool" data-tool="ellipse" aria-pressed="false" title="Draw an ellipse">Ellipse</button>
+              <button type="button" class="pop-btn pop-tool pop-left-rail-tool" data-tool="text" aria-pressed="false" title="Place text">Text</button>
+              <button type="button" class="pop-btn pop-tool pop-left-rail-tool" data-tool="image" aria-pressed="false" title="Embed a raster image">Image</button>
             </div>
-            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-tools">Tools</span>
-          </div>
-          <div class="pop-ribbon-sep" aria-hidden="true"></div>
-          <div class="pop-ribbon-group" aria-labelledby="pop-ribbon-lbl-view">
-            <div class="pop-ribbon-group-main pop-ribbon-view-block" id="pop-tb-view-panel">
-              <div class="pop-ribbon-view-zoom" role="group" aria-label="Canvas zoom">
-                <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
-                <span class="pop-zoom-pct pop-tb-zoom-readout" id="pop-zoom-pct" aria-live="polite">100%</span>
-                <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
+            <div class="pop-left-rail-doc">
+              <label class="pop-tb-style-lbl" for="pop-frame-pick">Frame</label>
+              <div class="pop-tb-comp-insert-row">
+                <select id="pop-frame-pick" class="pop-comp-pick" aria-label="Active frame"></select>
+                <button type="button" class="pop-btn" id="pop-frame-add" title="Add a new empty frame">+</button>
               </div>
-              <button type="button" class="pop-btn" id="pop-zoom-fit" title="Fit entire canvas in view">Fit</button>
-              <button type="button" class="pop-btn" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset</button>
-            </div>
-            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-view">View</span>
-          </div>
-          <div class="pop-ribbon-sep" aria-hidden="true"></div>
-          <div class="pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-doc">
-            <div class="pop-ribbon-group-main pop-ribbon-doc-block" id="pop-tb-doc-panel">
-              <div class="pop-ribbon-doc-frame">
-                <label class="pop-tb-style-lbl" for="pop-frame-pick">Frame</label>
-                <div class="pop-tb-comp-insert-row">
-                  <select id="pop-frame-pick" class="pop-comp-pick" aria-label="Active frame"></select>
-                  <button type="button" class="pop-btn" id="pop-frame-add" title="Add a new empty frame">+</button>
-                </div>
-              </div>
-              <div class="pop-ribbon-doc-file" role="group" aria-label="Document file">
+              <div class="pop-left-rail-file" role="group" aria-label="Document file">
                 <button type="button" class="pop-btn pop-ribbon-file-btn" id="pop-doc-open" title="Load a .json document">Open…</button>
                 <button type="button" class="pop-btn pop-primary pop-ribbon-file-btn" id="pop-doc-save" title="Download document as .json">Save</button>
               </div>
             </div>
-            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-doc">File</span>
-          </div>
-          <div class="pop-ribbon-sep" aria-hidden="true"></div>
-          <div class="pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-export">
-            <div class="pop-ribbon-group-main" id="pop-tb-export-panel">
-              <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Export SVG">
-                <button type="button" class="pop-btn pop-primary pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-sel">
-                  <span class="pop-tb-grid-title">Selection</span>
-                  <span class="pop-tb-grid-sub">SVG</span>
-                </button>
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-all">
-                  <span class="pop-tb-grid-title">Frame</span>
-                  <span class="pop-tb-grid-sub">SVG</span>
-                </button>
-              </div>
-              <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Export HTML">
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-html">
-                  <span class="pop-tb-grid-title">HTML</span>
-                  <span class="pop-tb-grid-sub">Frame</span>
-                </button>
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-html-all">
-                  <span class="pop-tb-grid-title">HTML</span>
-                  <span class="pop-tb-grid-sub">All frames</span>
-                </button>
-              </div>
-              <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Copy design tokens">
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ribbon-copy-tokens-json" title="Copy tokens as JSON">
-                  <span class="pop-tb-grid-title">tokens.json</span>
-                  <span class="pop-tb-grid-sub">Copy</span>
-                </button>
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ribbon-copy-css-vars" title="Copy :root CSS variables">
-                  <span class="pop-tb-grid-title">:root CSS</span>
-                  <span class="pop-tb-grid-sub">Copy</span>
-                </button>
-              </div>
+            <button type="button" class="pop-btn pop-left-rail-inspector-btn" id="pop-left-rail-inspector" aria-expanded="false" title="Show or hide the inspector (layers and properties)">☰</button>
+          </nav>
+          <div class="pop-left-inspector">
+            <div class="pop-left-inspector-head">
+              <span class="pop-left-inspector-head-lbl">Inspector</span>
+              <button type="button" class="pop-btn pop-left-inspector-pin" id="pop-left-inspector-pin" aria-pressed="false" title="Keep inspector open">Pin</button>
             </div>
-            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-export">Export</span>
-          </div>
-          <div class="pop-ribbon-sep" aria-hidden="true"></div>
-          <div class="pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-arrange">
-            <div class="pop-ribbon-group-main" id="pop-tb-arrange-panel">
-              <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-arrange-grid" role="group" aria-label="Group and order">
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-group" disabled>
-                  <span class="pop-tb-grid-title">Group</span>
-                </button>
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ungroup" disabled>
-                  <span class="pop-tb-grid-title">Ungroup</span>
-                </button>
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-bring-front" disabled>
-                  <span class="pop-tb-grid-title">Front</span>
-                </button>
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-send-back" disabled>
-                  <span class="pop-tb-grid-title">Back</span>
-                </button>
-                <button type="button" class="pop-btn pop-danger pop-tb-grid-btn pop-ribbon-action-compact pop-tb-span2" id="pop-delete" disabled>
-                  <span class="pop-tb-grid-title">Delete</span>
-                </button>
-              </div>
-            </div>
-            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-arrange">Arrange</span>
-          </div>
-          <div class="pop-ribbon-sep" aria-hidden="true"></div>
-          <div class="pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-comp">
-            <div class="pop-tb-dd-panel pop-tb-comp-panel pop-ribbon-comp-inner" id="pop-tb-comp-panel">
-              <button type="button" class="pop-btn pop-primary pop-tb-comp-done" id="pop-comp-done" hidden>
-                Done editing
-              </button>
-              <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-comp-actions" role="group" aria-label="Components">
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-create-comp" disabled>
-                  <span class="pop-tb-grid-title">Create</span>
-                  <span class="pop-tb-grid-sub">Component</span>
-                </button>
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-detach" disabled>
-                  <span class="pop-tb-grid-title">Detach</span>
-                </button>
-                <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact pop-tb-span2" id="pop-edit-comp" disabled>
-                  <span class="pop-tb-grid-title">Edit main</span>
-                </button>
-              </div>
-              <div class="pop-tb-comp-insert pop-ribbon-comp-insert">
-                <span class="pop-tb-style-lbl">Insert</span>
-                <div class="pop-tb-comp-insert-row">
-                  <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
-                  <button type="button" class="pop-btn" id="pop-insert-inst">Place</button>
+            <div class="pop-left-inspector-scroll">
+              <div class="pop-inspector-section pop-ribbon-group" aria-labelledby="pop-ribbon-lbl-view">
+                <div class="pop-ribbon-group-main pop-ribbon-view-block" id="pop-tb-view-panel">
+                  <div class="pop-ribbon-view-zoom" role="group" aria-label="Canvas zoom">
+                    <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
+                    <span class="pop-zoom-pct pop-tb-zoom-readout" id="pop-zoom-pct" aria-live="polite">100%</span>
+                    <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
+                  </div>
+                  <button type="button" class="pop-btn" id="pop-zoom-fit" title="Fit entire canvas in view">Fit</button>
+                  <button type="button" class="pop-btn" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset</button>
                 </div>
+                <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-view">View</span>
               </div>
-            </div>
-            <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-comp">Components</span>
-          </div>
-        </div>
-        <input type="file" id="pop-file" accept="image/*" hidden />
-        <input type="file" id="pop-doc-file" accept="application/json,.json" hidden />
-      </div>
-      <div class="pop-main">
-        <aside class="pop-layers" aria-label="Layers and properties">
-          <div class="pop-layer-aside-head">
-            <div class="pop-layer-tabs" role="tablist" aria-label="Layer panel">
-              <button type="button" class="pop-layer-tab pop-layer-tab-active" role="tab" id="pop-tab-layers" aria-selected="true" aria-controls="pop-layers-tree-panel">Layers</button>
-              <button type="button" class="pop-layer-tab" role="tab" id="pop-tab-parent" aria-selected="false" aria-controls="pop-layers-parent-panel" title="See the path from the top of the tree down to the selected layer">Path</button>
-            </div>
-            <p class="pop-layer-aside-hint" id="pop-layer-aside-hint">Drag to reorder or nest · ⌘/Ctrl+click multi-select</p>
-          </div>
-          <div id="pop-layers-tree-panel" class="pop-layer-tab-panel" role="tabpanel" aria-labelledby="pop-tab-layers">
-            <ul class="pop-layer-list" id="pop-layers" data-pop-layer-tree></ul>
-          </div>
-          <div id="pop-layers-parent-panel" class="pop-layer-tab-panel" hidden role="tabpanel" aria-labelledby="pop-tab-parent">
-            <p class="pop-parent-panel-desc" id="pop-parent-panel-desc">Select a layer to see the path from the root down to it.</p>
-            <ol class="pop-parent-chain" id="pop-parent-chain" aria-label="Path from root to selected layer, top to bottom"></ol>
-            <button type="button" class="pop-btn pop-btn-block" id="pop-select-siblings" disabled title="Select every layer with the same parent as the current one">Select siblings</button>
-          </div>
-          <div class="pop-props">
-            <h2 class="pop-panel-h">Position</h2>
-            <div class="pop-prop-grid" id="pop-prop-grid">
-              <label class="pop-field"><span class="pop-field-lbl">X</span><input type="number" id="pop-px" class="pop-num" step="1" disabled /></label>
-              <label class="pop-field"><span class="pop-field-lbl">Y</span><input type="number" id="pop-py" class="pop-num" step="1" disabled /></label>
-              <label class="pop-field" id="pop-pw-wrap"><span class="pop-field-lbl">W</span><input type="number" id="pop-pw" class="pop-num" step="1" min="1" disabled /></label>
-              <label class="pop-field" id="pop-ph-wrap"><span class="pop-field-lbl">H</span><input type="number" id="pop-ph" class="pop-num" step="1" min="1" disabled /></label>
-            </div>
-            <label class="pop-field pop-field-fs" id="pop-fs-wrap"><span class="pop-field-lbl">Font size</span><input type="number" id="pop-pfs" class="pop-num" step="1" min="4" max="400" disabled /></label>
-          </div>
-          <div class="pop-props pop-style-section">
-            <h2 class="pop-panel-h">Fill &amp; stroke</h2>
-            <div class="pop-tb-style-grid">
-              <div class="pop-appearance-colors">
-                <div class="pop-tb-style-block" id="pop-fill-style-block">
-                  <span class="pop-tb-style-lbl">Fill</span>
-                  <div class="pop-color-picker">
-                    <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
-                    <input type="color" class="pop-color-native" id="pop-fill" value="#a78bfa" tabindex="-1" />
-                    <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
-                      <div class="pop-color-panel-cap">Theme colors</div>
-                      <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
-                      <div class="pop-color-panel-cap">Standard colors</div>
-                      <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
-                      <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
+              <div class="pop-inspector-section pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-export">
+                <div class="pop-ribbon-group-main" id="pop-tb-export-panel">
+                  <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Export SVG">
+                    <button type="button" class="pop-btn pop-primary pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-sel">
+                      <span class="pop-tb-grid-title">Selection</span>
+                      <span class="pop-tb-grid-sub">SVG</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-all">
+                      <span class="pop-tb-grid-title">Frame</span>
+                      <span class="pop-tb-grid-sub">SVG</span>
+                    </button>
+                  </div>
+                  <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Export HTML">
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-html">
+                      <span class="pop-tb-grid-title">HTML</span>
+                      <span class="pop-tb-grid-sub">Frame</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-html-all">
+                      <span class="pop-tb-grid-title">HTML</span>
+                      <span class="pop-tb-grid-sub">All frames</span>
+                    </button>
+                  </div>
+                  <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Copy design tokens">
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ribbon-copy-tokens-json" title="Copy tokens as JSON">
+                      <span class="pop-tb-grid-title">tokens.json</span>
+                      <span class="pop-tb-grid-sub">Copy</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ribbon-copy-css-vars" title="Copy :root CSS variables">
+                      <span class="pop-tb-grid-title">:root CSS</span>
+                      <span class="pop-tb-grid-sub">Copy</span>
+                    </button>
+                  </div>
+                </div>
+                <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-export">Export</span>
+              </div>
+              <div class="pop-inspector-section pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-arrange">
+                <div class="pop-ribbon-group-main" id="pop-tb-arrange-panel">
+                  <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-arrange-grid" role="group" aria-label="Group and order">
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-group" disabled>
+                      <span class="pop-tb-grid-title">Group</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ungroup" disabled>
+                      <span class="pop-tb-grid-title">Ungroup</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-bring-front" disabled>
+                      <span class="pop-tb-grid-title">Front</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-send-back" disabled>
+                      <span class="pop-tb-grid-title">Back</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-danger pop-tb-grid-btn pop-ribbon-action-compact pop-tb-span2" id="pop-delete" disabled>
+                      <span class="pop-tb-grid-title">Delete</span>
+                    </button>
+                  </div>
+                </div>
+                <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-arrange">Arrange</span>
+              </div>
+              <div class="pop-inspector-section pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-comp">
+                <div class="pop-tb-dd-panel pop-tb-comp-panel pop-ribbon-comp-inner" id="pop-tb-comp-panel">
+                  <button type="button" class="pop-btn pop-primary pop-tb-comp-done" id="pop-comp-done" hidden>
+                    Done editing
+                  </button>
+                  <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-comp-actions" role="group" aria-label="Components">
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-create-comp" disabled>
+                      <span class="pop-tb-grid-title">Create</span>
+                      <span class="pop-tb-grid-sub">Component</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-detach" disabled>
+                      <span class="pop-tb-grid-title">Detach</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact pop-tb-span2" id="pop-edit-comp" disabled>
+                      <span class="pop-tb-grid-title">Edit main</span>
+                    </button>
+                  </div>
+                  <div class="pop-tb-comp-insert pop-ribbon-comp-insert">
+                    <span class="pop-tb-style-lbl">Insert</span>
+                    <div class="pop-tb-comp-insert-row">
+                      <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
+                      <button type="button" class="pop-btn" id="pop-insert-inst">Place</button>
                     </div>
                   </div>
                 </div>
-                <div id="pop-stroke-style-blocks" class="pop-stroke-col">
-                  <div class="pop-tb-style-block">
-                    <span class="pop-tb-style-lbl">Stroke</span>
-                    <div class="pop-color-picker">
-                      <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
-                      <input type="color" class="pop-color-native" id="pop-stroke" value="#4c1d95" tabindex="-1" />
-                      <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
-                        <div class="pop-color-panel-cap">Theme colors</div>
-                        <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
-                        <div class="pop-color-panel-cap">Standard colors</div>
-                        <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
-                        <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
+                <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-comp">Components</span>
+              </div>
+              <aside class="pop-layers" aria-label="Layers and properties">
+                <div class="pop-layer-aside-head">
+                  <div class="pop-layer-tabs" role="tablist" aria-label="Layer panel">
+                    <button type="button" class="pop-layer-tab pop-layer-tab-active" role="tab" id="pop-tab-layers" aria-selected="true" aria-controls="pop-layers-tree-panel">Layers</button>
+                    <button type="button" class="pop-layer-tab" role="tab" id="pop-tab-parent" aria-selected="false" aria-controls="pop-layers-parent-panel" title="See the path from the top of the tree down to the selected layer">Path</button>
+                  </div>
+                  <p class="pop-layer-aside-hint" id="pop-layer-aside-hint">Drag to reorder or nest · ⌘/Ctrl+click multi-select</p>
+                </div>
+                <div id="pop-layers-tree-panel" class="pop-layer-tab-panel" role="tabpanel" aria-labelledby="pop-tab-layers">
+                  <ul class="pop-layer-list" id="pop-layers" data-pop-layer-tree></ul>
+                </div>
+                <div id="pop-layers-parent-panel" class="pop-layer-tab-panel" hidden role="tabpanel" aria-labelledby="pop-tab-parent">
+                  <p class="pop-parent-panel-desc" id="pop-parent-panel-desc">Select a layer to see the path from the root down to it.</p>
+                  <ol class="pop-parent-chain" id="pop-parent-chain" aria-label="Path from root to selected layer, top to bottom"></ol>
+                  <button type="button" class="pop-btn pop-btn-block" id="pop-select-siblings" disabled title="Select every layer with the same parent as the current one">Select siblings</button>
+                </div>
+                <div class="pop-props">
+                  <h2 class="pop-panel-h">Position</h2>
+                  <div class="pop-prop-grid" id="pop-prop-grid">
+                    <label class="pop-field"><span class="pop-field-lbl">X</span><input type="number" id="pop-px" class="pop-num" step="1" disabled /></label>
+                    <label class="pop-field"><span class="pop-field-lbl">Y</span><input type="number" id="pop-py" class="pop-num" step="1" disabled /></label>
+                    <label class="pop-field" id="pop-pw-wrap"><span class="pop-field-lbl">W</span><input type="number" id="pop-pw" class="pop-num" step="1" min="1" disabled /></label>
+                    <label class="pop-field" id="pop-ph-wrap"><span class="pop-field-lbl">H</span><input type="number" id="pop-ph" class="pop-num" step="1" min="1" disabled /></label>
+                  </div>
+                  <label class="pop-field pop-field-fs" id="pop-fs-wrap"><span class="pop-field-lbl">Font size</span><input type="number" id="pop-pfs" class="pop-num" step="1" min="4" max="400" disabled /></label>
+                </div>
+                <div class="pop-props pop-style-section">
+                  <h2 class="pop-panel-h">Fill &amp; stroke</h2>
+                  <div class="pop-tb-style-grid">
+                    <div class="pop-appearance-colors">
+                      <div class="pop-tb-style-block" id="pop-fill-style-block">
+                        <span class="pop-tb-style-lbl">Fill</span>
+                        <div class="pop-color-picker">
+                          <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
+                          <input type="color" class="pop-color-native" id="pop-fill" value="#a78bfa" tabindex="-1" />
+                          <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
+                            <div class="pop-color-panel-cap">Theme colors</div>
+                            <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
+                            <div class="pop-color-panel-cap">Standard colors</div>
+                            <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
+                            <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
+                          </div>
+                        </div>
+                      </div>
+                      <div id="pop-stroke-style-blocks" class="pop-stroke-col">
+                        <div class="pop-tb-style-block">
+                          <span class="pop-tb-style-lbl">Stroke</span>
+                          <div class="pop-color-picker">
+                            <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
+                            <input type="color" class="pop-color-native" id="pop-stroke" value="#4c1d95" tabindex="-1" />
+                            <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
+                              <div class="pop-color-panel-cap">Theme colors</div>
+                              <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
+                              <div class="pop-color-panel-cap">Standard colors</div>
+                              <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
+                              <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
+                            </div>
+                          </div>
+                        </div>
+                        <label class="pop-tb-style-block pop-tb-stroke-w">
+                          <span class="pop-tb-style-lbl">Width</span>
+                          <input type="range" id="pop-stroke-w" min="0" max="12" value="2" aria-label="Stroke width" />
+                        </label>
                       </div>
                     </div>
+                    <div class="pop-appearance-sliders">
+                      <label class="pop-tb-style-block pop-tb-opacity">
+                        <span class="pop-tb-style-lbl">Opacity</span>
+                        <input type="range" id="pop-opacity" min="0" max="100" value="100" aria-label="Opacity" />
+                      </label>
+                      <label class="pop-tb-style-block pop-tb-rx" id="pop-rx-wrap">
+                        <span class="pop-tb-style-lbl">Radius</span>
+                        <input type="range" id="pop-rx" min="0" max="80" value="0" aria-label="Corner radius" />
+                      </label>
+                    </div>
+                    <div class="pop-token-bind-grid">
+                      <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Fill token</span>
+                        <select id="pop-fill-token-ref" class="pop-comp-pick" aria-label="Bind fill color to a design token"></select>
+                      </label>
+                      <label class="pop-field pop-field-fs" id="pop-stroke-token-wrap"><span class="pop-field-lbl">Stroke token</span>
+                        <select id="pop-stroke-token-ref" class="pop-comp-pick" aria-label="Bind stroke color to a design token"></select>
+                      </label>
+                    </div>
                   </div>
-                  <label class="pop-tb-style-block pop-tb-stroke-w">
-                    <span class="pop-tb-style-lbl">Width</span>
-                    <input type="range" id="pop-stroke-w" min="0" max="12" value="2" aria-label="Stroke width" />
-                  </label>
                 </div>
-              </div>
-              <div class="pop-appearance-sliders">
-                <label class="pop-tb-style-block pop-tb-opacity">
-                  <span class="pop-tb-style-lbl">Opacity</span>
-                  <input type="range" id="pop-opacity" min="0" max="100" value="100" aria-label="Opacity" />
-                </label>
-                <label class="pop-tb-style-block pop-tb-rx" id="pop-rx-wrap">
-                  <span class="pop-tb-style-lbl">Radius</span>
-                  <input type="range" id="pop-rx" min="0" max="80" value="0" aria-label="Corner radius" />
-                </label>
-              </div>
-              <div class="pop-token-bind-grid">
-                <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Fill token</span>
-                  <select id="pop-fill-token-ref" class="pop-comp-pick" aria-label="Bind fill color to a design token"></select>
-                </label>
-                <label class="pop-field pop-field-fs" id="pop-stroke-token-wrap"><span class="pop-field-lbl">Stroke token</span>
-                  <select id="pop-stroke-token-ref" class="pop-comp-pick" aria-label="Bind stroke color to a design token"></select>
-                </label>
-              </div>
+                <div class="pop-props" id="pop-typography-props" hidden>
+                  <h2 class="pop-panel-h">Text</h2>
+                  <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Font</span><input type="text" id="pop-font-family" class="pop-num" spellcheck="false" /></label>
+                  <div class="pop-prop-grid">
+                    <label class="pop-field"><span class="pop-field-lbl">Weight</span><input type="number" id="pop-font-weight" class="pop-num" min="100" max="900" step="100" /></label>
+                    <label class="pop-field"><span class="pop-field-lbl">Tracking</span><input type="number" id="pop-letter-spacing" class="pop-num" step="0.5" /></label>
+                  </div>
+                  <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Line height</span><input type="number" id="pop-line-height" class="pop-num" min="0.5" max="3" step="0.05" /></label>
+                </div>
+                <div class="pop-props" id="pop-group-layout-props" hidden>
+                  <h2 class="pop-panel-h">HTML: children in group</h2>
+                  <p class="pop-panel-desc" id="pop-group-layout-desc">
+                    Canvas stays the same. This only changes the exported HTML/CSS: either keep each child’s position, or lay children out with flexbox (stack).
+                  </p>
+                  <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Layout</span>
+                    <select id="pop-group-layout" aria-label="How children are arranged in exported HTML" aria-describedby="pop-group-layout-desc">
+                      <option value="none">Freeform — absolute positions</option>
+                      <option value="stack-v">Vertical stack (flex column)</option>
+                      <option value="stack-h">Horizontal stack (flex row)</option>
+                    </select>
+                  </label>
+                  <div class="pop-prop-grid">
+                    <label class="pop-field"><span class="pop-field-lbl">Gap</span><input type="number" id="pop-group-gap" class="pop-num" min="0" step="1" /></label>
+                    <label class="pop-field"><span class="pop-field-lbl">Pad</span><input type="number" id="pop-group-pad" class="pop-num" min="0" step="1" /></label>
+                  </div>
+                </div>
+                <div class="pop-props" id="pop-design-tokens-props" tabindex="-1">
+                  <h2 class="pop-panel-h">Design tokens</h2>
+                  <p class="pop-panel-desc">
+                    Export to code as <span class="pop-code">--pop-color-*</span>, <span class="pop-code">--pop-radius-*</span>, <span class="pop-code">--pop-space-*</span>. Use fill/stroke token picks above to keep layers tied to tokens in HTML export.
+                  </p>
+                  <h3 class="pop-panel-subh">Colors</h3>
+                  <ul class="pop-token-list" id="pop-token-color-list"></ul>
+                  <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-color-add">Add color</button>
+                  <h3 class="pop-panel-subh">Radius</h3>
+                  <ul class="pop-token-list" id="pop-token-radius-list"></ul>
+                  <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-radius-add">Add radius</button>
+                  <h3 class="pop-panel-subh">Space</h3>
+                  <ul class="pop-token-list" id="pop-token-space-list"></ul>
+                  <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-space-add">Add space</button>
+                  <div class="pop-token-handoff" role="group" aria-label="Copy tokens for your codebase">
+                    <button type="button" class="pop-btn" id="pop-copy-tokens-json">Copy tokens.json</button>
+                    <button type="button" class="pop-btn" id="pop-download-tokens-json">Download tokens.json</button>
+                    <button type="button" class="pop-btn" id="pop-copy-css-vars">Copy CSS variables</button>
+                  </div>
+                </div>
+                <div class="pop-props pop-props-tight">
+                  <div class="pop-symmetry">
+                    <label class="pop-check"><input type="checkbox" id="pop-guides" checked /><span>Guides &amp; snap</span></label>
+                    <p class="pop-hint" id="pop-sym-hint"></p>
+                  </div>
+                </div>
+              </aside>
             </div>
           </div>
-          <div class="pop-props" id="pop-typography-props" hidden>
-            <h2 class="pop-panel-h">Text</h2>
-            <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Font</span><input type="text" id="pop-font-family" class="pop-num" spellcheck="false" /></label>
-            <div class="pop-prop-grid">
-              <label class="pop-field"><span class="pop-field-lbl">Weight</span><input type="number" id="pop-font-weight" class="pop-num" min="100" max="900" step="100" /></label>
-              <label class="pop-field"><span class="pop-field-lbl">Tracking</span><input type="number" id="pop-letter-spacing" class="pop-num" step="0.5" /></label>
-            </div>
-            <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Line height</span><input type="number" id="pop-line-height" class="pop-num" min="0.5" max="3" step="0.05" /></label>
-          </div>
-          <div class="pop-props" id="pop-group-layout-props" hidden>
-            <h2 class="pop-panel-h">HTML: children in group</h2>
-            <p class="pop-panel-desc" id="pop-group-layout-desc">
-              Canvas stays the same. This only changes the exported HTML/CSS: either keep each child’s position, or lay children out with flexbox (stack).
-            </p>
-            <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Layout</span>
-              <select id="pop-group-layout" aria-label="How children are arranged in exported HTML" aria-describedby="pop-group-layout-desc">
-                <option value="none">Freeform — absolute positions</option>
-                <option value="stack-v">Vertical stack (flex column)</option>
-                <option value="stack-h">Horizontal stack (flex row)</option>
-              </select>
-            </label>
-            <div class="pop-prop-grid">
-              <label class="pop-field"><span class="pop-field-lbl">Gap</span><input type="number" id="pop-group-gap" class="pop-num" min="0" step="1" /></label>
-              <label class="pop-field"><span class="pop-field-lbl">Pad</span><input type="number" id="pop-group-pad" class="pop-num" min="0" step="1" /></label>
-            </div>
-          </div>
-          <div class="pop-props" id="pop-design-tokens-props" tabindex="-1">
-            <h2 class="pop-panel-h">Design tokens</h2>
-            <p class="pop-panel-desc">
-              Export to code as <span class="pop-code">--pop-color-*</span>, <span class="pop-code">--pop-radius-*</span>, <span class="pop-code">--pop-space-*</span>. Use fill/stroke token picks above to keep layers tied to tokens in HTML export.
-            </p>
-            <h3 class="pop-panel-subh">Colors</h3>
-            <ul class="pop-token-list" id="pop-token-color-list"></ul>
-            <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-color-add">Add color</button>
-            <h3 class="pop-panel-subh">Radius</h3>
-            <ul class="pop-token-list" id="pop-token-radius-list"></ul>
-            <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-radius-add">Add radius</button>
-            <h3 class="pop-panel-subh">Space</h3>
-            <ul class="pop-token-list" id="pop-token-space-list"></ul>
-            <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-space-add">Add space</button>
-            <div class="pop-token-handoff" role="group" aria-label="Copy tokens for your codebase">
-              <button type="button" class="pop-btn" id="pop-copy-tokens-json">Copy tokens.json</button>
-              <button type="button" class="pop-btn" id="pop-download-tokens-json">Download tokens.json</button>
-              <button type="button" class="pop-btn" id="pop-copy-css-vars">Copy CSS variables</button>
-            </div>
-          </div>
-          <div class="pop-props pop-props-tight">
-            <div class="pop-symmetry">
-              <label class="pop-check"><input type="checkbox" id="pop-guides" checked /><span>Guides &amp; snap</span></label>
-              <p class="pop-hint" id="pop-sym-hint"></p>
-            </div>
-          </div>
-        </aside>
+        </div>
         <div class="pop-canvas-wrap" title="⌘+scroll to pan · Ctrl+scroll or pinch to zoom toward the pointer">
           <svg class="pop-canvas" id="pop-svg" viewBox="0 0 ${VIEW_W} ${VIEW_H}" width="${VIEW_W}" height="${VIEW_H}" role="img" aria-label="Design canvas">
             <g id="pop-viewport" transform="translate(0 0) scale(1)">
@@ -503,39 +516,49 @@ export function mount(root: HTMLElement): void {
           </div>
         </div>
         <aside class="pop-ai-pane" aria-label="AI design assistant">
-          <h2 class="pop-panel-h">Design assistant</h2>
-          <p class="pop-panel-desc">
-            Describe changes; the model must reply with JSON patch operations only. Use an OpenAI-compatible
-            <span class="pop-code">POST …/chat/completions</span> URL. Direct calls to OpenAI from the browser are often blocked by CORS—use a small proxy or DevTools extension if needed.
-          </p>
-          <div class="pop-ai-field-grid">
-            <label class="pop-field pop-field-fs">
-              <span class="pop-field-lbl">Endpoint</span>
-              <input type="url" id="pop-ai-endpoint" placeholder="https://api.openai.com/v1/chat/completions" spellcheck="false" autocomplete="off" />
-            </label>
-            <label class="pop-field pop-field-fs">
-              <span class="pop-field-lbl">API key</span>
-              <input type="password" id="pop-ai-key" placeholder="Optional if your proxy adds auth" autocomplete="off" />
-            </label>
-            <label class="pop-field pop-field-fs">
-              <span class="pop-field-lbl">Model</span>
-              <input type="text" id="pop-ai-model" spellcheck="false" autocomplete="off" />
-            </label>
+          <div class="pop-ai-pane-head">
+            <h2 class="pop-panel-h">Design assistant</h2>
           </div>
-          <div class="pop-ai-log" id="pop-ai-log" role="log" aria-live="polite"></div>
-          <textarea
-            class="pop-ai-prompt"
-            id="pop-ai-prompt"
-            placeholder="Example: Add a muted purple rectangle at the bottom of frame 1 and bump default corner radius on selected rects."
-            aria-label="Design request for AI"
-          ></textarea>
-          <div class="pop-ai-actions">
-            <button type="button" class="pop-btn pop-primary" id="pop-ai-send">Apply with AI</button>
-            <span class="pop-hint" id="pop-ai-status"></span>
+          <div class="pop-ai-pane-chat pop-ai-log" id="pop-ai-log" role="log" aria-live="polite"></div>
+          <div class="pop-ai-pane-composer">
+            <textarea
+              class="pop-ai-prompt"
+              id="pop-ai-prompt"
+              placeholder="Example: Add a muted purple rectangle at the bottom of frame 1 and bump default corner radius on selected rects."
+              aria-label="Design request for AI"
+            ></textarea>
+            <div class="pop-ai-actions">
+              <button type="button" class="pop-btn pop-primary" id="pop-ai-send">Apply with AI</button>
+              <span class="pop-hint" id="pop-ai-status"></span>
+            </div>
           </div>
+          <details class="pop-ai-settings">
+            <summary>API connection</summary>
+            <p class="pop-panel-desc">
+              Describe changes; the model must reply with JSON patch operations only. Use an OpenAI-compatible
+              <span class="pop-code">POST …/chat/completions</span> URL. Direct calls to OpenAI from the browser are often blocked by CORS—use a small proxy or DevTools extension if needed.
+            </p>
+            <div class="pop-ai-field-grid">
+              <label class="pop-field pop-field-fs">
+                <span class="pop-field-lbl">Endpoint</span>
+                <input type="url" id="pop-ai-endpoint" placeholder="https://api.openai.com/v1/chat/completions" spellcheck="false" autocomplete="off" />
+              </label>
+              <label class="pop-field pop-field-fs">
+                <span class="pop-field-lbl">API key</span>
+                <input type="password" id="pop-ai-key" placeholder="Optional if your proxy adds auth" autocomplete="off" />
+              </label>
+              <label class="pop-field pop-field-fs">
+                <span class="pop-field-lbl">Model</span>
+                <input type="text" id="pop-ai-model" spellcheck="false" autocomplete="off" />
+              </label>
+            </div>
+          </details>
         </aside>
       </div>
+      <input type="file" id="pop-file" accept="image/*" hidden />
+      <input type="file" id="pop-doc-file" accept="application/json,.json" hidden />
     </div>
+
   `
 
   const svg = root.querySelector<SVGSVGElement>('#pop-svg')!
@@ -648,6 +671,20 @@ export function mount(root: HTMLElement): void {
   const aiPromptTextarea = root.querySelector<HTMLTextAreaElement>('#pop-ai-prompt')!
   const btnAiSend = root.querySelector<HTMLButtonElement>('#pop-ai-send')!
   const aiStatusEl = root.querySelector<HTMLElement>('#pop-ai-status')!
+  const leftShellEl = root.querySelector<HTMLElement>('#pop-left-shell')!
+  const btnRailInspector = root.querySelector<HTMLButtonElement>('#pop-left-rail-inspector')!
+  const btnInspectorPin = root.querySelector<HTMLButtonElement>('#pop-left-inspector-pin')!
+
+  function applyLeftInspectorVisibility(): void {
+    const open =
+      leftInspectorPinned ||
+      leftInspectorPeek ||
+      selected.size > 0 ||
+      tool !== 'select'
+    leftShellEl.classList.toggle('pop-left-inspector-open', open)
+    btnRailInspector.setAttribute('aria-expanded', String(open))
+    btnInspectorPin.setAttribute('aria-pressed', String(leftInspectorPinned))
+  }
 
   function appendAiLog(kind: 'user' | 'model' | 'err' | 'sys', text: string): void {
     const p = document.createElement('p')
@@ -670,6 +707,24 @@ export function mount(root: HTMLElement): void {
   aiEndpointInput.addEventListener('blur', () => writeAiEndpoint(aiEndpointInput.value))
   aiKeyInput.addEventListener('blur', () => writeAiKey(aiKeyInput.value))
   aiModelInput.addEventListener('blur', () => writeAiModel(aiModelInput.value))
+
+  btnRailInspector.addEventListener('click', () => {
+    if (leftInspectorPinned) {
+      leftInspectorPinned = false
+      writeLeftInspectorPinned(false)
+      leftInspectorPeek = false
+    } else {
+      leftInspectorPeek = !leftInspectorPeek
+    }
+    applyLeftInspectorVisibility()
+  })
+  btnInspectorPin.addEventListener('click', () => {
+    leftInspectorPinned = !leftInspectorPinned
+    writeLeftInspectorPinned(leftInspectorPinned)
+    if (leftInspectorPinned) leftInspectorPeek = false
+    applyLeftInspectorVisibility()
+  })
+  applyLeftInspectorVisibility()
 
   let tokenUiSyncing = false
 
@@ -1762,6 +1817,7 @@ export function mount(root: HTMLElement): void {
       setTool('select')
     }
     renderHandles()
+    applyLeftInspectorVisibility()
   }
 
   function getNode(id: string): SceneNode | undefined {
@@ -2551,6 +2607,7 @@ export function mount(root: HTMLElement): void {
       g.classList.toggle('pop-item-selected', canvasHighlight)
     })
     if (layersAsideTab === 'parent') renderParentPanel()
+    applyLeftInspectorVisibility()
   }
 
   function pruneLayerNames(): void {
