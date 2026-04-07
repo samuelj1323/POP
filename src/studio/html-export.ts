@@ -48,16 +48,27 @@ function rgbaFromHex(hex: string, opacity: number): string {
   return `rgba(${r},${g},${b},${opacity})`
 }
 
+export type HtmlExportOptions = {
+  title?: string
+  /** Injected as `<link rel="stylesheet">` before inline styles (design system CSS, fonts). */
+  stylesheetUrls?: string[]
+}
+
 export function exportFrameToHtml(
   frame: PopFrame,
   nodes: Map<string, SceneNode>,
   definitions: Map<string, ComponentDefinition>,
   tokens: DesignTokens,
-  options?: { title?: string },
+  options?: HtmlExportOptions,
 ): string {
   const title = escapeHtml(options?.title ?? frame.label)
   const body = frame.rootIds.map((rid) => emitRoot(rid, frame, nodes, definitions, tokens)).join('\n')
   const cssVars = tokensToCssRootBlock(tokens)
+  const extraLinks = (options?.stylesheetUrls ?? [])
+    .map((u) => u.trim())
+    .filter((u) => u.length > 0)
+    .map((href) => `  <link rel="stylesheet" href="${escapeHtml(href)}" />`)
+    .join('\n')
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -65,7 +76,7 @@ export function exportFrameToHtml(
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${title}</title>
-  <style>
+${extraLinks ? `${extraLinks}\n` : ''}  <style>
     * { box-sizing: border-box; }
     ${cssVars}
     body { margin: 0; min-height: 100vh; font-family: system-ui, sans-serif; }

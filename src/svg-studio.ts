@@ -66,6 +66,8 @@ import {
   tokensToCssRootBlock,
   tokensToJson,
 } from './studio/design-tokens.ts'
+import { DESIGN_SYSTEM_PRESETS } from './studio/design-system-presets.ts'
+import { importDesignTokensFromJson, mergeDesignTokens } from './studio/import-tokens.ts'
 import { downloadHtml, exportFrameToHtml } from './studio/html-export.ts'
 import {
   buildDesignLlmSystemPrompt,
@@ -129,6 +131,8 @@ export function mount(root: HTMLElement): void {
   let activeFrameId = frames[0]!.id
   let docName = 'Untitled'
   let tokens: DesignTokens = {}
+  /** Stylesheet URLs merged into exported HTML `<head>`. */
+  let htmlExportStylesheets: string[] = []
   /** When editing a component, scene roots are not frame roots. */
   let componentEditRoots: string[] | null = null
   let nodes = new Map<string, SceneNode>()
@@ -487,6 +491,25 @@ export function mount(root: HTMLElement): void {
                     <button type="button" class="pop-btn" id="pop-download-tokens-json">Download tokens.json</button>
                     <button type="button" class="pop-btn" id="pop-copy-css-vars">Copy CSS variables</button>
                   </div>
+                  <h3 class="pop-panel-subh">External design systems</h3>
+                  <p class="pop-panel-desc">
+                    Import token JSON from Material, Salt, or other tools (POP shape, W3C/DTCG, or flat color keys). Add stylesheet URLs so HTML export loads their CSS (fonts, variables).
+                  </p>
+                  <div class="pop-token-handoff" role="group" aria-label="Import tokens JSON">
+                    <input type="file" id="pop-token-import-file" accept=".json,application/json" hidden />
+                    <button type="button" class="pop-btn" id="pop-token-import-pick">Import tokens…</button>
+                    <label class="pop-check"><input type="checkbox" id="pop-token-import-replace" /> Replace all</label>
+                  </div>
+                  <label class="pop-field pop-field-fs">
+                    <span class="pop-field-lbl">HTML export stylesheets</span>
+                    <textarea id="pop-html-export-stylesheets" class="pop-ai-prompt" rows="3" placeholder="One URL per line" aria-label="Stylesheet URLs for exported HTML"></textarea>
+                  </label>
+                  <label class="pop-field pop-field-fs">
+                    <span class="pop-field-lbl">Preset</span>
+                    <select id="pop-ds-preset" aria-label="Apply design system stylesheet preset">
+                      <option value="">Apply preset…</option>
+                    </select>
+                  </label>
                 </div>
                 <div class="pop-props pop-props-tight">
                   <div class="pop-symmetry">
@@ -671,8 +694,24 @@ export function mount(root: HTMLElement): void {
   const btnCopyCssVars = root.querySelector<HTMLButtonElement>('#pop-copy-css-vars')!
   const btnRibbonCopyTokensJson = root.querySelector<HTMLButtonElement>('#pop-ribbon-copy-tokens-json')!
   const btnRibbonCopyCssVars = root.querySelector<HTMLButtonElement>('#pop-ribbon-copy-css-vars')!
+  const tokenImportFile = root.querySelector<HTMLInputElement>('#pop-token-import-file')!
+  const btnTokenImportPick = root.querySelector<HTMLButtonElement>('#pop-token-import-pick')!
+  const tokenImportReplace = root.querySelector<HTMLInputElement>('#pop-token-import-replace')!
+  const taHtmlExportStylesheets = root.querySelector<HTMLTextAreaElement>('#pop-html-export-stylesheets')!
+  const selDsPreset = root.querySelector<HTMLSelectElement>('#pop-ds-preset')!
   const aiKeyInput = root.querySelector<HTMLInputElement>('#pop-ai-key')!
   const aiModelSelect = root.querySelector<HTMLSelectElement>('#pop-ai-model')!
+
+  function parseStylesheetLines(text: string): string[] {
+    return text
+      .split(/\n/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+  }
+
+  function syncHtmlExportStylesheetsUi(): void {
+    taHtmlExportStylesheets.value = htmlExportStylesheets.join('\n')
+  }
   const aiLogEl = root.querySelector<HTMLElement>('#pop-ai-log')!
   const aiPromptTextarea = root.querySelector<HTMLTextAreaElement>('#pop-ai-prompt')!
   const btnAiSend = root.querySelector<HTMLButtonElement>('#pop-ai-send')!
@@ -709,6 +748,14 @@ export function mount(root: HTMLElement): void {
     opt.value = m.id
     opt.textContent = m.label
     aiModelSelect.appendChild(opt)
+  }
+
+  for (const p of DESIGN_SYSTEM_PRESETS) {
+    if (p.id === 'none') continue
+    const opt = document.createElement('option')
+    opt.value = p.id
+    opt.textContent = p.label
+    selDsPreset.appendChild(opt)
   }
 
   const aiStored = readAiSettingsFromStorage()
@@ -1259,7 +1306,11 @@ export function mount(root: HTMLElement): void {
   function buildDocumentV3(): PopDocumentV3 {
     return {
       v: 3,
-      meta: { name: docName, updatedAt: new Date().toISOString() },
+      meta: {
+        name: docName,
+        updatedAt: new Date().toISOString(),
+        htmlExportStylesheets: [...htmlExportStylesheets],
+      },
       tokens,
       frames: JSON.parse(JSON.stringify(frames)) as PopFrame[],
       activeFrameId,
@@ -1334,6 +1385,11 @@ export function mount(root: HTMLElement): void {
   function applyDocumentV3(doc: PopDocumentV3): void {
     docName = doc.meta.name
     tokens = doc.tokens ?? {}
+    htmlExportStylesheets =
+      Array.isArray(doc.meta.htmlExportStylesheets) &&
+      doc.meta.htmlExportStylesheets.every((x) => typeof x === 'string')
+        ? [...doc.meta.htmlExportStylesheets]
+        : []
     frames = JSON.parse(JSON.stringify(doc.frames)) as PopFrame[]
     activeFrameId = doc.activeFrameId
     if (!frames.some((f) => f.id === activeFrameId)) activeFrameId = frames[0]!.id
@@ -1358,6 +1414,7 @@ export function mount(root: HTMLElement): void {
     recomputeWorldSize()
     renderTokensPanel()
     refreshFillStrokeTokenSelects()
+    syncHtmlExportStylesheetsUi()
   }
 
   try {
@@ -1423,6 +1480,7 @@ export function mount(root: HTMLElement): void {
   updateBothSwatches()
   renderTokensPanel()
   refreshFillStrokeTokenSelects()
+  syncHtmlExportStylesheetsUi()
 
   let hintTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -3566,6 +3624,53 @@ Current document (PopDocumentV3 JSON):\n${docJson}\n\nUser request:\n${prompt}\n
   btnCopyCssVars.addEventListener('click', () => handoffCopyCssVars())
   btnRibbonCopyCssVars.addEventListener('click', () => handoffCopyCssVars())
 
+  btnTokenImportPick.addEventListener('click', () => tokenImportFile.click())
+  tokenImportFile.addEventListener('change', () => {
+    const file = tokenImportFile.files?.[0]
+    tokenImportFile.value = ''
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result)) as unknown
+        const r = importDesignTokensFromJson(parsed)
+        if (!r.ok) {
+          alert(r.message)
+          return
+        }
+        ensureTokenBuckets()
+        if (tokenImportReplace.checked) {
+          tokens = r.tokens
+        } else {
+          tokens = mergeDesignTokens(tokens, r.tokens)
+        }
+        renderTokensPanel()
+        refreshFillStrokeTokenSelects()
+        schedulePersist()
+        commit()
+      } catch {
+        alert('Could not parse JSON.')
+      }
+    }
+    reader.readAsText(file)
+  })
+
+  taHtmlExportStylesheets.addEventListener('input', () => {
+    htmlExportStylesheets = parseStylesheetLines(taHtmlExportStylesheets.value)
+    schedulePersist()
+  })
+
+  selDsPreset.addEventListener('change', () => {
+    const id = selDsPreset.value
+    selDsPreset.value = ''
+    if (!id) return
+    const p = DESIGN_SYSTEM_PRESETS.find((x) => x.id === id)
+    if (!p || p.id === 'none') return
+    htmlExportStylesheets = [...p.stylesheetUrls]
+    syncHtmlExportStylesheetsUi()
+    schedulePersist()
+  })
+
   strokeWInput.addEventListener('input', () => {
     syncChromeFromInputs()
     for (const id of selected) {
@@ -4090,14 +4195,20 @@ ${parts}
 
   btnExportHtml.addEventListener('click', () => {
     const f = getActiveFrame()
-    const html = exportFrameToHtml(f, nodes, definitions, tokens, { title: docName })
+    const html = exportFrameToHtml(f, nodes, definitions, tokens, {
+      title: docName,
+      stylesheetUrls: htmlExportStylesheets,
+    })
     downloadHtml(html, `${(f.label || 'frame').replace(/\s+/g, '-')}.html`)
   })
 
   btnExportHtmlAll.addEventListener('click', () => {
     let delay = 0
     for (const f of frames) {
-      const html = exportFrameToHtml(f, nodes, definitions, tokens, { title: `${docName} · ${f.label}` })
+      const html = exportFrameToHtml(f, nodes, definitions, tokens, {
+        title: `${docName} · ${f.label}`,
+        stylesheetUrls: htmlExportStylesheets,
+      })
       const name = `${(f.label || 'frame').replace(/\s+/g, '-')}.html`
       window.setTimeout(() => downloadHtml(html, name), delay)
       delay += 200

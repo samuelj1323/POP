@@ -8,6 +8,8 @@ import { recordToDefs, recordToNodes } from './persistence.ts'
 export type PopDocumentMeta = {
   name: string
   updatedAt?: string
+  /** Absolute URLs for `<link rel="stylesheet">` in exported HTML (design system CSS, fonts). */
+  htmlExportStylesheets?: string[]
 }
 
 export type DesignTokens = {
@@ -189,9 +191,19 @@ export function loadDocumentV3(data: unknown): PopDocumentV3 | null {
   const tokens: DesignTokens =
     o.tokens && typeof o.tokens === 'object' ? (o.tokens as DesignTokens) : {}
 
+  const htmlExportStylesheets =
+    Array.isArray(meta.htmlExportStylesheets) &&
+    (meta.htmlExportStylesheets as unknown[]).every((x) => typeof x === 'string')
+      ? [...(meta.htmlExportStylesheets as string[])]
+      : undefined
+
   const doc: PopDocumentV3 = {
     v: 3,
-    meta: { name: meta.name, updatedAt: typeof meta.updatedAt === 'string' ? meta.updatedAt : undefined },
+    meta: {
+      name: meta.name,
+      updatedAt: typeof meta.updatedAt === 'string' ? meta.updatedAt : undefined,
+      ...(htmlExportStylesheets !== undefined ? { htmlExportStylesheets } : {}),
+    },
     tokens,
     frames,
     activeFrameId,
