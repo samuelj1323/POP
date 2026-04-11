@@ -1,4 +1,5 @@
 import type { VibePatchOp } from './vibe-patch.ts'
+import { parseVibePlacementLayoutPatchObject } from './vibe-placement-layout.ts'
 
 const AI_STORAGE_ENDPOINT = 'pop-ai-endpoint'
 const AI_STORAGE_KEY = 'pop-ai-key'
@@ -74,20 +75,21 @@ export function buildVibeDesignLlmSystemPrompt(): string {
   return `You are a design assistant for POP, a browser-based vibe designing platform.
 
 There are two layers:
-1) **Library** — reusable components: each has an id, display name, and HTML fragment (inline CSS or <style> blocks).
-2) **Page** — ordered list of **placements**. Each placement has its own id and references a library component via componentId. The iframe preview renders **only** these placements, in order—not the whole library.
+1) **Library** — reusable components: each has an id, display name, HTML fragment (inline CSS or <style> blocks), and optional **inputValues** as default text for brace-wrapped token placeholders in the HTML (token names: letters, digits, underscore, hyphen).
+2) **Page** — ordered list of **placements**. Each placement has its own id, references a library component via componentId, optional **inputValues** that override the component defaults for that instance only, and a **layout** object (widthMode fill|fixed|content, widthPx, maxWidthPx, margin/padding px, align start|center|end|stretch, background CSS color, borderRadiusPx, shadow none|sm|md, border none|subtle|strong). The iframe preview renders **only** these placements, in order—not the whole library.
 
 You output ONLY valid JSON: either a JSON array of patch operations, or a single object {"ops": [...]}.
 
 Each operation is an object with an "op" field. Allowed ops:
 
 **Library**
-- {"op":"addComponent","component":{"name":string,"html":string,"id"?:string}} — adds a definition to the library (not automatically on the page). Optional id must be a new UUID if provided.
-- {"op":"updateComponent","id":string,"patch":{"name"?:string,"html"?:string}} — merge into an existing library component.
+- {"op":"addComponent","component":{"name":string,"html":string,"id"?:string,"inputValues"?:object}} — adds a definition to the library (not automatically on the page). Optional id must be a new UUID if provided. Optional inputValues: map token name → string for brace placeholders in html.
+- {"op":"updateComponent","id":string,"patch":{"name"?:string,"html"?:string,"inputValues"?:object}} — merge into an existing library component. inputValues updates defaults only; keys not in html are dropped. Existing placements have their overrides pruned to the new html tokens.
 - {"op":"removeComponent","id":string} — removes from library and removes all page placements that reference that componentId.
 
 **Page (preview)**
-- {"op":"addPagePlacement","componentId":string,"placementId"?:string} — append one instance of a library component to the page. componentId must exist in the library. Optional placementId = new UUID if omitted.
+- {"op":"addPagePlacement","componentId":string,"placementId"?:string,"inputValues"?:object} — append one instance. Optional inputValues: per-instance overrides (merged over that component's defaults). Optional placementId = new UUID if omitted.
+- {"op":"updatePagePlacement","id":string,"patch":{"inputValues"?:object,"layout"?:object}} — merge into one placement by id. inputValues: keys not in that component's html are dropped. layout: partial layout fields merged (at least one of inputValues or layout must be present).
 - {"op":"removePagePlacement","id":string} — remove one placement by its id (from pagePlacements in context).
 - {"op":"movePagePlacement","id":string,"toIndex":number} — move the placement to a zero-based index in the current page list after removal (0 = top; use length to append).
 
@@ -118,6 +120,12 @@ function isVibePatchOp(x: unknown): x is VibePatchOp {
       if (!c || typeof c !== 'object') return false
       if (typeof c.name !== 'string' || typeof c.html !== 'string') return false
       if (c.id !== undefined && typeof c.id !== 'string') return false
+      if (c.inputValues !== undefined) {
+        if (!c.inputValues || typeof c.inputValues !== 'object' || Array.isArray(c.inputValues)) return false
+        for (const v of Object.values(c.inputValues as Record<string, unknown>)) {
+          if (typeof v !== 'string') return false
+        }
+      }
       return true
     }
     case 'updateComponent': {
@@ -126,6 +134,12 @@ function isVibePatchOp(x: unknown): x is VibePatchOp {
       if (!p || typeof p !== 'object') return false
       if (p.name !== undefined && typeof p.name !== 'string') return false
       if (p.html !== undefined && typeof p.html !== 'string') return false
+      if (p.inputValues !== undefined) {
+        if (!p.inputValues || typeof p.inputValues !== 'object' || Array.isArray(p.inputValues)) return false
+        for (const v of Object.values(p.inputValues as Record<string, unknown>)) {
+          if (typeof v !== 'string') return false
+        }
+      }
       return true
     }
     case 'removeComponent':
@@ -133,6 +147,31 @@ function isVibePatchOp(x: unknown): x is VibePatchOp {
     case 'addPagePlacement': {
       if (typeof o.componentId !== 'string') return false
       if (o.placementId !== undefined && typeof o.placementId !== 'string') return false
+      if (o.inputValues !== undefined) {
+        if (!o.inputValues || typeof o.inputValues !== 'object' || Array.isArray(o.inputValues)) return false
+        for (const v of Object.values(o.inputValues as Record<string, unknown>)) {
+          if (typeof v !== 'string') return false
+        }
+      }
+      return true
+    }
+    case 'updatePagePlacement': {
+      if (typeof o.id !== 'string') return false
+      const p = o.patch as Record<string, unknown> | undefined
+      if (!p || typeof p !== 'object') return false
+      const hasIv = p.inputValues !== undefined
+      const hasLayout = p.layout !== undefined
+      if (!hasIv && !hasLayout) return false
+      if (hasIv) {
+        if (!p.inputValues || typeof p.inputValues !== 'object' || Array.isArray(p.inputValues)) return false
+        for (const v of Object.values(p.inputValues as Record<string, unknown>)) {
+          if (typeof v !== 'string') return false
+        }
+      }
+      if (hasLayout) {
+        if (!p.layout || typeof p.layout !== 'object' || Array.isArray(p.layout)) return false
+        if (parseVibePlacementLayoutPatchObject(p.layout) === null) return false
+      }
       return true
     }
     case 'removePagePlacement':

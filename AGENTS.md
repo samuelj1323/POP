@@ -33,7 +33,7 @@ This repository is **Pop**, a browser-based **vibe designing** platform (Svelte 
 | `llm-design.ts` | Gemini/OpenAI-compatible fetch, `buildVibeDesignLlmSystemPrompt()`, `parseVibePatchOpsFromLlmText()`, AI settings in `localStorage` |
 | `id.ts` | `newId()` (UUID) |
 
-**Document shape (`v: 2`):** `components[]` = library definitions; `pagePlacements[]` = `{ id, componentId }` in top-to-bottom preview order.
+**Document shape (`v: 2`):** `components[]` = library definitions; `pagePlacements[]` = `{ id, componentId, inputValues, layout }` in top-to-bottom preview order. Each placement `layout` controls iframe slot chrome (width, spacing, surface); see `src/studio/vibe-placement-layout.ts`.
 
 Legacy **SVG studio** modules have been removed.
 

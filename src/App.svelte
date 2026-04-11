@@ -1,12 +1,19 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, tick } from 'svelte'
+  import type { Action } from 'svelte/action'
+  import { fromAction } from 'svelte/attachments'
   import type { VibeComponent, VibeDocument, VibePagePlacement } from './studio/vibe-document.ts'
   import {
     createEmptyVibeDocument,
     documentToVibeContextJson,
   } from './studio/vibe-document.ts'
   import { loadVibeDocument, saveVibeDocument } from './studio/vibe-persistence.ts'
-  import { buildVibePreviewSrcdoc } from './studio/vibe-preview-html.ts'
+  import {
+    buildVibePreviewSrcdoc,
+    buildVibeSingleComponentPreviewSrcdoc,
+    extractVibeTemplateTokens,
+    pruneVibeComponentInputValues,
+  } from './studio/vibe-preview-html.ts'
   import { applyVibePatchOps } from './studio/vibe-patch.ts'
   import { newId } from './studio/id.ts'
   import {
@@ -21,6 +28,26 @@
     writeAiKey,
     writeAiModel,
   } from './studio/llm-design.ts'
+  import {
+    createDefaultVibePlacementLayout,
+    mergeVibePlacementLayoutPatch,
+    sanitizeVibePlacementBackground,
+    VIBE_PLACEMENT_LAYOUT_PRESETS,
+    type VibePlacementAlign,
+    type VibePlacementBorder,
+    type VibePlacementLayout,
+    type VibePlacementLayoutPresetId,
+    type VibePlacementShadow,
+    type VibePlacementWidthMode,
+  } from './studio/vibe-placement-layout.ts'
+
+  type AiChatRole = 'user' | 'assistant' | 'system'
+  type AiChatMessage = {
+    id: string
+    role: AiChatRole
+    text: string
+    createdAt: number
+  }
 
   let doc = $state<VibeDocument>(createEmptyVibeDocument())
   let docHydrated = $state(false)
@@ -28,26 +55,131 @@
   let formName = $state('')
   let formHtml = $state('')
   let editingId = $state<string | null>(null)
+  /** Library list selection: drives single-component iframe preview in Library tab. */
+  let selectedLibraryComponentId = $state<string | null>(null)
+  /** Placeholder values while composing a new component (not yet saved). */
+  let formInputValues = $state<Record<string, string>>({})
 
   let aiEndpoint = $state('')
   let aiKey = $state('')
   let aiModel = $state('')
   let aiUserMessage = $state('')
-  let aiStatus = $state('')
+  let aiChatMessages = $state<AiChatMessage[]>([])
   let aiBusy = $state(false)
   let abortCtl: AbortController | null = null
 
-  const previewSrcdoc = $derived(buildVibePreviewSrcdoc(doc.pagePlacements, doc.components))
+  const aiThreadScrollAction: Action<HTMLDivElement, AiChatMessage[]> = (node, _messages) => {
+    async function scrollToEnd(): Promise<void> {
+      await tick()
+      node.scrollTop = node.scrollHeight
+    }
+    void scrollToEnd()
+    return { update: () => void scrollToEnd() }
+  }
+
+  function pushAiChatMessage(role: AiChatRole, text: string): void {
+    aiChatMessages = [
+      ...aiChatMessages,
+      { id: newId(), role, text, createdAt: Date.now() },
+    ]
+  }
+
+  const previewSrcdoc = $derived.by(() => {
+    if (workspaceMode === 'page') {
+      return buildVibePreviewSrcdoc(doc.pagePlacements, doc.components)
+    }
+    if (selectedLibraryComponentId) {
+      const c = doc.components.find((x) => x.id === selectedLibraryComponentId)
+      if (c) return buildVibeSingleComponentPreviewSrcdoc(c)
+    }
+    return buildVibePreviewSrcdoc(doc.pagePlacements, doc.components)
+  })
+
+  const previewChromeLabel = $derived.by(() => {
+    if (workspaceMode === 'page') {
+      return 'Page preview (placed components only)'
+    }
+    if (selectedLibraryComponentId) {
+      const name = doc.components.find((x) => x.id === selectedLibraryComponentId)?.name
+      return name ? `Component preview — ${name}` : 'Component preview'
+    }
+    return 'Page preview (select a library item to preview it alone)'
+  })
+
+  const templateTokensInForm = $derived(extractVibeTemplateTokens(formHtml))
 
   function componentNameForPlacement(p: VibePagePlacement): string {
     return doc.components.find((c) => c.id === p.componentId)?.name ?? 'Missing component'
   }
 
+  function componentForPlacement(p: VibePagePlacement): VibeComponent | undefined {
+    return doc.components.find((c) => c.id === p.componentId)
+  }
+
+  function placementTemplateTokens(p: VibePagePlacement): string[] {
+    const html = componentForPlacement(p)?.html ?? ''
+    return extractVibeTemplateTokens(html)
+  }
+
+  /** Effective value: placement override, else library default. */
+  function placementFieldValue(p: VibePagePlacement, token: string): string {
+    const comp = componentForPlacement(p)
+    if (Object.prototype.hasOwnProperty.call(p.inputValues, token)) {
+      return p.inputValues[token]!
+    }
+    return comp?.inputValues[token] ?? ''
+  }
+
+  function setPlacementInputValue(placementId: string, token: string, value: string): void {
+    const idx = doc.pagePlacements.findIndex((p) => p.id === placementId)
+    if (idx < 0) return
+    const p = doc.pagePlacements[idx]!
+    const comp = componentForPlacement(p)
+    const html = comp?.html ?? ''
+    const nextPlacements = [...doc.pagePlacements]
+    nextPlacements[idx] = {
+      ...p,
+      inputValues: pruneVibeComponentInputValues(html, { ...p.inputValues, [token]: value }),
+    }
+    doc = { ...doc, pagePlacements: nextPlacements }
+  }
+
   function addPlacement(componentId: string): void {
     doc = {
       ...doc,
-      pagePlacements: [...doc.pagePlacements, { id: newId(), componentId }],
+      pagePlacements: [
+        ...doc.pagePlacements,
+        {
+          id: newId(),
+          componentId,
+          inputValues: {},
+          layout: createDefaultVibePlacementLayout(),
+        },
+      ],
     }
+  }
+
+  function updatePlacementLayout(placementId: string, patch: Partial<VibePlacementLayout>): void {
+    const idx = doc.pagePlacements.findIndex((p) => p.id === placementId)
+    if (idx < 0) return
+    const p = doc.pagePlacements[idx]!
+    const layout = mergeVibePlacementLayoutPatch(p.layout, patch)
+    const nextPlacements = [...doc.pagePlacements]
+    nextPlacements[idx] = { ...p, layout }
+    doc = { ...doc, pagePlacements: nextPlacements }
+  }
+
+  function setPlacementLayoutPreset(
+    placementId: string,
+    presetId: VibePlacementLayoutPresetId
+  ): void {
+    const idx = doc.pagePlacements.findIndex((p) => p.id === placementId)
+    if (idx < 0) return
+    const p = doc.pagePlacements[idx]!
+    const preset = VIBE_PLACEMENT_LAYOUT_PRESETS[presetId]
+    const nextPlacements = [...doc.pagePlacements]
+    nextPlacements[idx] = { ...p, layout: { ...preset } }
+    doc = { ...doc, pagePlacements: nextPlacements }
   }
 
   function removePlacement(placementId: string): void {
@@ -104,16 +236,65 @@
     saveVibeDocument(doc)
   })
 
+  /** Sync draft placeholder keys with `{token}` names in HTML (new component only). */
+  $effect(() => {
+    if (editingId) return
+    const tokens = extractVibeTemplateTokens(formHtml)
+    const next: Record<string, string> = {}
+    for (const t of tokens) {
+      next[t] = formInputValues[t] ?? ''
+    }
+    const keysMatch =
+      Object.keys(next).length === Object.keys(formInputValues).length &&
+      Object.keys(next).every((k) => next[k] === formInputValues[k])
+    if (!keysMatch) {
+      formInputValues = next
+    }
+  })
+
+  /** Drop stale placeholder keys when HTML tokens change (saved component in the form). */
+  $effect(() => {
+    if (!editingId) return
+    const idx = doc.components.findIndex((c) => c.id === editingId)
+    if (idx < 0) return
+    const c = doc.components[idx]!
+    const pruned = pruneVibeComponentInputValues(formHtml, c.inputValues)
+    const same =
+      Object.keys(pruned).length === Object.keys(c.inputValues).length &&
+      Object.keys(pruned).every((k) => pruned[k] === c.inputValues[k])
+    if (!same) {
+      const nextComps = [...doc.components]
+      nextComps[idx] = { ...c, inputValues: pruned }
+      doc = { ...doc, components: nextComps }
+    }
+  })
+
   function resetForm(): void {
     formName = ''
     formHtml = ''
     editingId = null
+    selectedLibraryComponentId = null
+    formInputValues = {}
   }
 
-  function startEdit(c: VibeComponent): void {
+  function selectLibraryComponent(c: VibeComponent): void {
+    selectedLibraryComponentId = c.id
     editingId = c.id
     formName = c.name
     formHtml = c.html
+  }
+
+  function setComponentInputValue(componentId: string, token: string, value: string): void {
+    const idx = doc.components.findIndex((c) => c.id === componentId)
+    if (idx < 0) return
+    const c = doc.components[idx]!
+    const nextComps = [...doc.components]
+    nextComps[idx] = { ...c, inputValues: { ...c.inputValues, [token]: value } }
+    doc = { ...doc, components: nextComps }
+  }
+
+  function setFormInputValue(token: string, value: string): void {
+    formInputValues = { ...formInputValues, [token]: value }
   }
 
   function submitComponent(): void {
@@ -127,13 +308,35 @@
     if (editingId) {
       const idx = doc.components.findIndex((c) => c.id === editingId)
       if (idx < 0) return
+      const cur = doc.components[idx]!
       const next = [...doc.components]
-      next[idx] = { ...next[idx]!, name, html: formHtml }
-      doc = { ...doc, components: next }
+      next[idx] = {
+        ...cur,
+        name,
+        html: formHtml,
+        inputValues: pruneVibeComponentInputValues(formHtml, cur.inputValues),
+      }
+      doc = {
+        ...doc,
+        components: next,
+        pagePlacements: doc.pagePlacements.map((p) =>
+          p.componentId === editingId
+            ? { ...p, inputValues: pruneVibeComponentInputValues(formHtml, p.inputValues) }
+            : p
+        ),
+      }
     } else {
       doc = {
         ...doc,
-        components: [...doc.components, { id: newId(), name, html: formHtml }],
+        components: [
+          ...doc.components,
+          {
+            id: newId(),
+            name,
+            html: formHtml,
+            inputValues: pruneVibeComponentInputValues(formHtml, formInputValues),
+          },
+        ],
       }
     }
     resetForm()
@@ -145,7 +348,7 @@
       components: doc.components.filter((c) => c.id !== id),
       pagePlacements: doc.pagePlacements.filter((p) => p.componentId !== id),
     }
-    if (editingId === id) resetForm()
+    if (editingId === id || selectedLibraryComponentId === id) resetForm()
   }
 
   function resolveLlmEndpoint(): string {
@@ -158,8 +361,10 @@
   async function sendAi(): Promise<void> {
     const msg = aiUserMessage.trim()
     if (!msg || aiBusy) return
+    pushAiChatMessage('user', msg)
+    aiUserMessage = ''
+
     aiBusy = true
-    aiStatus = ''
     abortCtl?.abort()
     abortCtl = new AbortController()
 
@@ -184,17 +389,25 @@
     abortCtl = null
 
     if (!reply.ok) {
-      aiStatus = reply.error
+      if (reply.error === 'aborted') {
+        pushAiChatMessage('system', 'Request cancelled.')
+      } else {
+        pushAiChatMessage('system', reply.error)
+      }
       return
     }
     const parsed = parseVibePatchOpsFromLlmText(reply.content)
     if (!parsed.ok) {
-      aiStatus = parsed.error
+      pushAiChatMessage('system', parsed.error)
       return
     }
     doc = applyVibePatchOps(doc, parsed.ops)
-    aiStatus = `Applied ${parsed.ops.length} operation(s).`
-    aiUserMessage = ''
+    pushAiChatMessage(
+      'assistant',
+      parsed.ops.length === 0
+        ? 'No operations returned; document unchanged.'
+        : `Applied ${parsed.ops.length} operation${parsed.ops.length === 1 ? '' : 's'}.`
+    )
   }
 
   function cancelAi(): void {
@@ -206,7 +419,9 @@
   <header class="vibe-header">
     <div class="vibe-brand">
       <span class="vibe-logo">POP</span>
-      <span class="vibe-tagline">Library + page builder — preview shows the page only</span>
+      <span class="vibe-tagline">
+        Library + page builder — Page builder shows the composed page; Library can preview one component
+      </span>
     </div>
   </header>
 
@@ -238,8 +453,10 @@
       {#if workspaceMode === 'library'}
         <h2 class="vibe-panel-title">Component library</h2>
         <p class="vibe-hint">
-          Definitions live here only. Paste HTML (inline CSS or <code>&lt;style&gt;</code> is fine). Open
-          <strong>Page builder</strong> to place items on the preview.
+          Definitions live here only. Paste HTML (inline CSS or <code>&lt;style&gt;</code> is fine).           Use <code>{'{token}'}</code> for editable text (e.g.
+          <code>&lt;h2&gt;{'{title}'}</code>&lt;/h2&gt;).
+          Defaults here apply to new page instances; override each instance in <strong>Page builder</strong>.
+          Click a saved component to preview with these defaults.
         </p>
 
         <form
@@ -265,9 +482,37 @@
             class="vibe-textarea"
             bind:value={formHtml}
             rows="12"
-            placeholder={'<div style="padding:1rem">...</div>'}
-            spellcheck="false"
+            placeholder='<div style="padding:1rem">...</div>'
+            spellcheck={false}
           ></textarea>
+
+          {#if templateTokensInForm.length > 0}
+            <p class="vibe-label" style="margin-top: 0.5rem">Placeholder values</p>
+            <p class="vibe-hint" style="margin: 0 0 0.35rem">
+              Default text for <code>{'{name}'}</code> in the HTML (per-instance overrides in Page builder).
+            </p>
+            <div class="vibe-token-fields">
+              {#each templateTokensInForm as token (token)}
+                <div class="vibe-token-row">
+                  <label class="vibe-label vibe-token-label" for="vibe-token-{token}">{`{${token}}`}</label>
+                  <input
+                    id="vibe-token-{token}"
+                    class="vibe-input"
+                    type="text"
+                    value={editingId
+                      ? (doc.components.find((c) => c.id === editingId)?.inputValues[token] ?? '')
+                      : (formInputValues[token] ?? '')}
+                    oninput={(e) => {
+                      const v = e.currentTarget.value
+                      if (editingId) setComponentInputValue(editingId, token, v)
+                      else setFormInputValue(token, v)
+                    }}
+                    autocomplete="off"
+                  />
+                </div>
+              {/each}
+            </div>
+          {/if}
 
           <div class="vibe-form-actions">
             <button type="submit" class="vibe-btn vibe-btn--primary">
@@ -287,10 +532,15 @@
         {:else}
           <ul class="vibe-list">
             {#each doc.components as c (c.id)}
-              <li class="vibe-list-item">
-                <span class="vibe-list-name">{c.name}</span>
+              <li
+                class="vibe-list-item"
+                class:vibe-list-item--selected={selectedLibraryComponentId === c.id}
+              >
+                <button type="button" class="vibe-list-select" onclick={() => selectLibraryComponent(c)}>
+                  <span class="vibe-list-name">{c.name}</span>
+                </button>
                 <div class="vibe-list-actions">
-                  <button type="button" class="vibe-btn vibe-btn--small" onclick={() => startEdit(c)}>
+                  <button type="button" class="vibe-btn vibe-btn--small" onclick={() => selectLibraryComponent(c)}>
                     Edit
                   </button>
                   <button
@@ -308,8 +558,8 @@
       {:else}
         <h2 class="vibe-panel-title">Page builder</h2>
         <p class="vibe-hint">
-          The center preview shows this ordered stack only. You can place the same library component more
-          than once.
+          Preview stacks placements in order. By default the wrapper adds <strong>no</strong> extra card—your
+          library HTML sets the look. Use presets when you want a framed block (padding, surface, shadow).
         </p>
 
         <h3 class="vibe-subtitle">Add from library</h3>
@@ -338,11 +588,282 @@
         {:else}
           <ul class="vibe-page-list">
             {#each doc.pagePlacements as p, idx (p.id)}
+              {@const placementTokens = placementTemplateTokens(p)}
               <li class="vibe-page-item">
                 <div class="vibe-page-item-main">
                   <span class="vibe-page-name">{componentNameForPlacement(p)}</span>
                   <span class="vibe-page-id" title={p.id}>{p.id.slice(0, 8)}…</span>
                 </div>
+
+                <div class="vibe-inspector-presets">
+                  <span class="vibe-inspector-section" style="margin-top:0">Presets</span>
+                  <div class="vibe-inspector-preset-btns">
+                    <button
+                      type="button"
+                      class="vibe-btn vibe-btn--small"
+                      title="No wrapper chrome—component HTML defines the surface"
+                      onclick={() => setPlacementLayoutPreset(p.id, 'default')}
+                    >
+                      Plain
+                    </button>
+                    <button
+                      type="button"
+                      class="vibe-btn vibe-btn--small"
+                      onclick={() => setPlacementLayoutPreset(p.id, 'hero')}
+                    >
+                      Hero
+                    </button>
+                    <button
+                      type="button"
+                      class="vibe-btn vibe-btn--small"
+                      onclick={() => setPlacementLayoutPreset(p.id, 'card')}
+                    >
+                      Card
+                    </button>
+                    <button
+                      type="button"
+                      class="vibe-btn vibe-btn--small"
+                      onclick={() => setPlacementLayoutPreset(p.id, 'section')}
+                    >
+                      Section
+                    </button>
+                    <button
+                      type="button"
+                      class="vibe-btn vibe-btn--small"
+                      onclick={() => setPlacementLayoutPreset(p.id, 'ctaRow')}
+                    >
+                      CTA row
+                    </button>
+                  </div>
+                </div>
+
+                <p class="vibe-inspector-section">Layout</p>
+                <div class="vibe-inspector-grid">
+                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-wm">Width</label>
+                  <select
+                    id="vibe-pl-{p.id}-wm"
+                    class="vibe-select"
+                    value={p.layout.widthMode}
+                    onchange={(e) =>
+                      updatePlacementLayout(p.id, {
+                        widthMode: e.currentTarget.value as VibePlacementWidthMode,
+                      })}
+                  >
+                    <option value="fill">Fill (100%)</option>
+                    <option value="fixed">Fixed (px)</option>
+                    <option value="content">Hug content</option>
+                  </select>
+
+                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-al">Align</label>
+                  <select
+                    id="vibe-pl-{p.id}-al"
+                    class="vibe-select"
+                    value={p.layout.align}
+                    onchange={(e) =>
+                      updatePlacementLayout(p.id, {
+                        align: e.currentTarget.value as VibePlacementAlign,
+                      })}
+                  >
+                    <option value="stretch">Stretch</option>
+                    <option value="start">Start</option>
+                    <option value="center">Center</option>
+                    <option value="end">End</option>
+                  </select>
+                </div>
+                {#if p.layout.widthMode === 'fill'}
+                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-mw"
+                    >Max width (px, 0 = none)</label
+                  >
+                  <input
+                    id="vibe-pl-{p.id}-mw"
+                    class="vibe-input vibe-input--inspector-num"
+                    type="number"
+                    min="0"
+                    max="2400"
+                    value={p.layout.maxWidthPx}
+                    oninput={(e) =>
+                      updatePlacementLayout(p.id, {
+                        maxWidthPx: Number(e.currentTarget.value) || 0,
+                      })}
+                  />
+                {:else if p.layout.widthMode === 'fixed'}
+                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-wp">Width (px)</label>
+                  <input
+                    id="vibe-pl-{p.id}-wp"
+                    class="vibe-input vibe-input--inspector-num"
+                    type="number"
+                    min="80"
+                    max="2000"
+                    value={p.layout.widthPx}
+                    oninput={(e) =>
+                      updatePlacementLayout(p.id, {
+                        widthPx: Number(e.currentTarget.value) || 80,
+                      })}
+                  />
+                {/if}
+                <div class="vibe-inspector-grid" style="margin-top: 0.35rem">
+                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-mt">Margin T</label>
+                  <input
+                    id="vibe-pl-{p.id}-mt"
+                    class="vibe-input vibe-input--inspector-num"
+                    type="number"
+                    min="0"
+                    max="200"
+                    value={p.layout.marginTopPx}
+                    oninput={(e) =>
+                      updatePlacementLayout(p.id, {
+                        marginTopPx: Number(e.currentTarget.value) || 0,
+                      })}
+                  />
+                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-mb">Margin B</label>
+                  <input
+                    id="vibe-pl-{p.id}-mb"
+                    class="vibe-input vibe-input--inspector-num"
+                    type="number"
+                    min="0"
+                    max="200"
+                    value={p.layout.marginBottomPx}
+                    oninput={(e) =>
+                      updatePlacementLayout(p.id, {
+                        marginBottomPx: Number(e.currentTarget.value) || 0,
+                      })}
+                  />
+                </div>
+
+                <p class="vibe-inspector-section">Style</p>
+                <p class="vibe-inspector-label-sm" style="margin: 0 0 0.25rem">Padding (px)</p>
+                <div class="vibe-inspector-grid vibe-inspector-grid--pads">
+                  <input
+                    class="vibe-input vibe-input--inspector-num"
+                    type="number"
+                    min="0"
+                    max="200"
+                    title="Top"
+                    aria-label="Padding top"
+                    value={p.layout.paddingTopPx}
+                    oninput={(e) =>
+                      updatePlacementLayout(p.id, {
+                        paddingTopPx: Number(e.currentTarget.value) || 0,
+                      })}
+                  />
+                  <input
+                    class="vibe-input vibe-input--inspector-num"
+                    type="number"
+                    min="0"
+                    max="200"
+                    title="Right"
+                    aria-label="Padding right"
+                    value={p.layout.paddingRightPx}
+                    oninput={(e) =>
+                      updatePlacementLayout(p.id, {
+                        paddingRightPx: Number(e.currentTarget.value) || 0,
+                      })}
+                  />
+                  <input
+                    class="vibe-input vibe-input--inspector-num"
+                    type="number"
+                    min="0"
+                    max="200"
+                    title="Bottom"
+                    aria-label="Padding bottom"
+                    value={p.layout.paddingBottomPx}
+                    oninput={(e) =>
+                      updatePlacementLayout(p.id, {
+                        paddingBottomPx: Number(e.currentTarget.value) || 0,
+                      })}
+                  />
+                  <input
+                    class="vibe-input vibe-input--inspector-num"
+                    type="number"
+                    min="0"
+                    max="200"
+                    title="Left"
+                    aria-label="Padding left"
+                    value={p.layout.paddingLeftPx}
+                    oninput={(e) =>
+                      updatePlacementLayout(p.id, {
+                        paddingLeftPx: Number(e.currentTarget.value) || 0,
+                      })}
+                  />
+                </div>
+                <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-bg">Background</label>
+                <input
+                  id="vibe-pl-{p.id}-bg"
+                  class="vibe-input vibe-input--mono"
+                  type="text"
+                  value={p.layout.background}
+                  onchange={(e) =>
+                    updatePlacementLayout(p.id, {
+                      background: sanitizeVibePlacementBackground(e.currentTarget.value),
+                    })}
+                  autocomplete="off"
+                  placeholder="transparent, #fff, rgba(...)"
+                />
+                <div class="vibe-inspector-grid" style="margin-top: 0.35rem">
+                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-br">Radius</label>
+                  <input
+                    id="vibe-pl-{p.id}-br"
+                    class="vibe-input vibe-input--inspector-num"
+                    type="number"
+                    min="0"
+                    max="64"
+                    value={p.layout.borderRadiusPx}
+                    oninput={(e) =>
+                      updatePlacementLayout(p.id, {
+                        borderRadiusPx: Number(e.currentTarget.value) || 0,
+                      })}
+                  />
+                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-sh">Shadow</label>
+                  <select
+                    id="vibe-pl-{p.id}-sh"
+                    class="vibe-select"
+                    value={p.layout.shadow}
+                    onchange={(e) =>
+                      updatePlacementLayout(p.id, {
+                        shadow: e.currentTarget.value as VibePlacementShadow,
+                      })}
+                  >
+                    <option value="none">None</option>
+                    <option value="sm">Small</option>
+                    <option value="md">Medium</option>
+                  </select>
+                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-bd">Border</label>
+                  <select
+                    id="vibe-pl-{p.id}-bd"
+                    class="vibe-select"
+                    value={p.layout.border}
+                    onchange={(e) =>
+                      updatePlacementLayout(p.id, {
+                        border: e.currentTarget.value as VibePlacementBorder,
+                      })}
+                  >
+                    <option value="none">None</option>
+                    <option value="subtle">Subtle</option>
+                    <option value="strong">Strong</option>
+                  </select>
+                </div>
+
+                {#if placementTokens.length > 0}
+                  <p class="vibe-inspector-section">Content</p>
+                  <div class="vibe-page-tokens">
+                    {#each placementTokens as token (token)}
+                      <div class="vibe-token-row vibe-token-row--inspector">
+                        <label class="vibe-label vibe-token-label" for="vibe-pl-{p.id}-{token}"
+                          >{`{${token}}`}</label
+                        >
+                        <input
+                          id="vibe-pl-{p.id}-{token}"
+                          class="vibe-input"
+                          type="text"
+                          value={placementFieldValue(p, token)}
+                          oninput={(e) =>
+                            setPlacementInputValue(p.id, token, e.currentTarget.value)}
+                          autocomplete="off"
+                        />
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
                 <div class="vibe-list-actions">
                   <button
                     type="button"
@@ -377,7 +898,7 @@
 
     <main class="vibe-preview-wrap" aria-label="Preview">
       <div class="vibe-preview-chrome">
-        <span class="vibe-preview-label">Page preview (placed components only)</span>
+        <span class="vibe-preview-label">{previewChromeLabel}</span>
       </div>
       <iframe
         class="vibe-preview-frame"
@@ -387,69 +908,99 @@
       ></iframe>
     </main>
 
-    <aside class="vibe-panel vibe-panel--right" aria-label="Design assistant">
+    <aside class="vibe-panel vibe-panel--right vibe-panel--assistant" aria-label="Design assistant">
       <h2 class="vibe-panel-title">Design assistant</h2>
       <p class="vibe-hint">
         Context includes the library and <code>pagePlacements</code>. The model returns JSON ops for library
         edits and for add/remove/reorder on the page.
       </p>
 
-      <label class="vibe-label" for="vibe-ai-endpoint">API endpoint (optional)</label>
-      <input
-        id="vibe-ai-endpoint"
-        class="vibe-input vibe-input--mono"
-        bind:value={aiEndpoint}
-        placeholder="Leave blank for Gemini URL from model"
-        autocomplete="off"
-      />
+      <div class="vibe-ai-settings">
+        <label class="vibe-label" for="vibe-ai-endpoint">API endpoint (optional)</label>
+        <input
+          id="vibe-ai-endpoint"
+          class="vibe-input vibe-input--mono"
+          bind:value={aiEndpoint}
+          placeholder="Leave blank for Gemini URL from model"
+          autocomplete="off"
+        />
 
-      <label class="vibe-label" for="vibe-ai-key">API key</label>
-      <input
-        id="vibe-ai-key"
-        class="vibe-input vibe-input--mono"
-        type="password"
-        bind:value={aiKey}
-        placeholder="Gemini: AI Studio key"
-        autocomplete="off"
-      />
+        <label class="vibe-label" for="vibe-ai-key">API key</label>
+        <input
+          id="vibe-ai-key"
+          class="vibe-input vibe-input--mono"
+          type="password"
+          bind:value={aiKey}
+          placeholder="Gemini: AI Studio key"
+          autocomplete="off"
+        />
 
-      <label class="vibe-label" for="vibe-ai-model">Model</label>
-      <select id="vibe-ai-model" class="vibe-select" bind:value={aiModel}>
-        {#each GOOGLE_AI_STUDIO_GEMINI_MODELS as m (m.id)}
-          <option value={m.id}>{m.label}</option>
-        {/each}
-      </select>
-
-      <label class="vibe-label" for="vibe-ai-msg">Request</label>
-      <textarea
-        id="vibe-ai-msg"
-        class="vibe-textarea"
-        bind:value={aiUserMessage}
-        rows="6"
-        placeholder="e.g. Add a footer component with copyright text"
-      ></textarea>
-
-      <div class="vibe-form-actions">
-        <button
-          type="button"
-          class="vibe-btn vibe-btn--primary"
-          disabled={aiBusy}
-          onclick={() => void sendAi()}
-        >
-          {aiBusy ? 'Sending…' : 'Send'}
-        </button>
-        {#if aiBusy}
-          <button type="button" class="vibe-btn vibe-btn--ghost" onclick={() => cancelAi()}>Cancel</button>
-        {/if}
+        <label class="vibe-label" for="vibe-ai-model">Model</label>
+        <select id="vibe-ai-model" class="vibe-select" bind:value={aiModel}>
+          {#each GOOGLE_AI_STUDIO_GEMINI_MODELS as m (m.id)}
+            <option value={m.id}>{m.label}</option>
+          {/each}
+        </select>
       </div>
-      {#if aiStatus}
-        <p
-          class="vibe-status"
-          class:vibe-status--error={!aiStatus.startsWith('Applied')}
+
+      <div class="vibe-ai-chat">
+        <div
+          class="vibe-ai-thread"
+          {@attach fromAction(aiThreadScrollAction, () => aiChatMessages)}
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions"
         >
-          {aiStatus}
-        </p>
-      {/if}
+          {#if aiChatMessages.length === 0}
+            <div class="vibe-ai-empty">
+              <p class="vibe-ai-empty-title">Ask for layout or copy changes</p>
+              <p class="vibe-ai-empty-body">
+                Describe what you want in plain language. Each send includes the current document as context;
+                successful replies apply patch operations to your library and page.
+              </p>
+            </div>
+          {:else}
+            {#each aiChatMessages as m (m.id)}
+              <div
+                class="vibe-ai-bubble"
+                class:vibe-ai-bubble--user={m.role === 'user'}
+                class:vibe-ai-bubble--assistant={m.role === 'assistant'}
+                class:vibe-ai-bubble--system={m.role === 'system'}
+              >
+                <span class="vibe-ai-bubble-role">{m.role}</span>
+                <div class="vibe-ai-bubble-text">{m.text}</div>
+              </div>
+            {/each}
+          {/if}
+        </div>
+
+        <div class="vibe-ai-composer">
+          <label class="vibe-label vibe-ai-composer-label" for="vibe-ai-msg">Message</label>
+          <textarea
+            id="vibe-ai-msg"
+            class="vibe-textarea vibe-ai-composer-input"
+            bind:value={aiUserMessage}
+            rows="3"
+            placeholder="e.g. Add a footer component with copyright text"
+            disabled={aiBusy}
+          ></textarea>
+          <div class="vibe-ai-composer-actions">
+            <button
+              type="button"
+              class="vibe-btn vibe-btn--primary"
+              disabled={aiBusy || !aiUserMessage.trim()}
+              onclick={() => void sendAi()}
+            >
+              {aiBusy ? 'Sending…' : 'Send'}
+            </button>
+            {#if aiBusy}
+              <button type="button" class="vibe-btn vibe-btn--ghost" onclick={() => cancelAi()}>
+                Cancel
+              </button>
+            {/if}
+          </div>
+        </div>
+      </div>
     </aside>
   </div>
 </div>
@@ -514,6 +1065,155 @@
   .vibe-panel--right {
     border-right: none;
     border-left: 1px solid var(--border);
+  }
+
+  .vibe-panel--assistant {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    gap: 0;
+  }
+
+  .vibe-panel--assistant > .vibe-panel-title {
+    flex-shrink: 0;
+  }
+
+  .vibe-panel--assistant > .vibe-hint {
+    flex-shrink: 0;
+    margin-bottom: 0.75rem;
+  }
+
+  .vibe-ai-settings {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 0.75rem;
+  }
+
+  .vibe-ai-chat {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+  }
+
+  .vibe-ai-thread {
+    flex: 1;
+    min-height: 120px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.15rem 0.1rem 0.35rem;
+    scrollbar-gutter: stable;
+  }
+
+  .vibe-ai-empty {
+    margin: auto 0;
+    padding: 1rem 0.5rem;
+    text-align: center;
+  }
+
+  .vibe-ai-empty-title {
+    margin: 0 0 0.4rem;
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--text);
+  }
+
+  .vibe-ai-empty-body {
+    margin: 0;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    color: var(--muted);
+  }
+
+  .vibe-ai-bubble {
+    max-width: 92%;
+    padding: 0.45rem 0.6rem;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+
+  .vibe-ai-bubble-role {
+    display: block;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 0.2rem;
+  }
+
+  .vibe-ai-bubble-text {
+    font-size: 0.84rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .vibe-ai-bubble--user {
+    align-self: flex-end;
+    margin-left: 1.5rem;
+    border-color: rgba(196, 181, 253, 0.35);
+    background: linear-gradient(180deg, rgba(196, 181, 253, 0.18), rgba(196, 181, 253, 0.06));
+  }
+
+  .vibe-ai-bubble--user .vibe-ai-bubble-role {
+    text-align: right;
+    color: rgba(196, 181, 253, 0.85);
+  }
+
+  .vibe-ai-bubble--assistant {
+    align-self: flex-start;
+    margin-right: 1.5rem;
+  }
+
+  .vibe-ai-bubble--system {
+    align-self: stretch;
+    max-width: none;
+    text-align: center;
+    border-style: dashed;
+    border-color: rgba(251, 113, 133, 0.35);
+    background: rgba(251, 113, 133, 0.06);
+  }
+
+  .vibe-ai-bubble--system .vibe-ai-bubble-role {
+    color: var(--danger);
+  }
+
+  .vibe-ai-bubble--system .vibe-ai-bubble-text {
+    color: var(--danger);
+    font-size: 0.82rem;
+  }
+
+  .vibe-ai-composer {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding-top: 0.25rem;
+    border-top: 1px solid var(--border);
+  }
+
+  .vibe-ai-composer-label {
+    margin-top: 0;
+  }
+
+  .vibe-ai-composer-input {
+    min-height: 4.5rem;
+    resize: vertical;
+  }
+
+  .vibe-ai-composer-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
   }
 
   @media (max-width: 1100px) {
@@ -684,6 +1384,48 @@
     background: var(--surface-2);
   }
 
+  .vibe-list-item--selected {
+    box-shadow: 0 0 0 1px rgba(196, 181, 253, 0.45);
+    border-color: rgba(196, 181, 253, 0.4);
+  }
+
+  .vibe-list-select {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    border: none;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    font: inherit;
+    font-weight: 600;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .vibe-list-select:hover .vibe-list-name {
+    color: var(--accent);
+  }
+
+  .vibe-token-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .vibe-token-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .vibe-token-label {
+    font-family: var(--mono);
+    margin-top: 0;
+  }
+
   .vibe-list-name {
     font-weight: 600;
     min-width: 0;
@@ -723,6 +1465,14 @@
     justify-content: space-between;
     gap: 0.5rem;
     min-width: 0;
+  }
+
+  .vibe-page-tokens {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    padding: 0.35rem 0 0;
+    border-top: 1px solid var(--border);
   }
 
   .vibe-page-name {
@@ -769,13 +1519,56 @@
     background: #fff;
   }
 
-  .vibe-status {
-    margin: 0.75rem 0 0;
-    font-size: 0.85rem;
-    color: var(--accent);
+  .vibe-inspector-section {
+    font-size: 0.78rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0.5rem 0 0.25rem;
+    font-weight: 600;
   }
 
-  .vibe-status--error {
-    color: var(--danger);
+  .vibe-inspector-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    gap: 0.4rem 0.5rem;
+    align-items: center;
   }
+
+  .vibe-inspector-grid--pads {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin-bottom: 0.35rem;
+  }
+
+  .vibe-inspector-label-sm {
+    font-size: 0.72rem;
+    color: var(--muted);
+  }
+
+  .vibe-inspector-presets {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .vibe-inspector-preset-btns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+  }
+
+  .vibe-input--inspector-num {
+    width: 100%;
+    min-width: 0;
+    padding: 0.25rem 0.4rem;
+    font-size: 0.85rem;
+  }
+
+  .vibe-token-row--inspector {
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
 </style>
