@@ -5,11 +5,21 @@ import type { ComponentDefinition, SceneNode } from './scene-types.ts'
 import type { PersistedStateV2 } from './persistence.ts'
 import { recordToDefs, recordToNodes } from './persistence.ts'
 
+/** User-uploaded HTML/CSS snippets merged into HTML export and live preview (`srcdoc`). */
+export type UploadedLibraryAsset = {
+  id: string
+  name: string
+  kind: 'css' | 'html'
+  content: string
+}
+
 export type PopDocumentMeta = {
   name: string
   updatedAt?: string
   /** Absolute URLs for `<link rel="stylesheet">` in exported HTML (design system CSS, fonts). */
   htmlExportStylesheets?: string[]
+  /** Injected into exported HTML / preview: CSS as `<style>`, HTML appended after the frame. */
+  uploadedLibraryAssets?: UploadedLibraryAsset[]
 }
 
 export type DesignTokens = {
@@ -197,12 +207,26 @@ export function loadDocumentV3(data: unknown): PopDocumentV3 | null {
       ? [...(meta.htmlExportStylesheets as string[])]
       : undefined
 
+  let uploadedLibraryAssets: UploadedLibraryAsset[] | undefined
+  if (Array.isArray(meta.uploadedLibraryAssets)) {
+    const out: UploadedLibraryAsset[] = []
+    for (const raw of meta.uploadedLibraryAssets as unknown[]) {
+      if (!raw || typeof raw !== 'object') continue
+      const a = raw as Record<string, unknown>
+      if (typeof a.id !== 'string' || typeof a.name !== 'string' || typeof a.content !== 'string') continue
+      if (a.kind !== 'css' && a.kind !== 'html') continue
+      out.push({ id: a.id, name: a.name, kind: a.kind, content: a.content })
+    }
+    if (out.length > 0) uploadedLibraryAssets = out
+  }
+
   const doc: PopDocumentV3 = {
     v: 3,
     meta: {
       name: meta.name,
       updatedAt: typeof meta.updatedAt === 'string' ? meta.updatedAt : undefined,
       ...(htmlExportStylesheets !== undefined ? { htmlExportStylesheets } : {}),
+      ...(uploadedLibraryAssets !== undefined ? { uploadedLibraryAssets } : {}),
     },
     tokens,
     frames,

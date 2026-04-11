@@ -28,6 +28,7 @@ import {
   type DesignTokens,
   type PopDocumentV3,
   type PopFrame,
+  type UploadedLibraryAsset,
 } from './studio/document.ts'
 import {
   defsToRecord,
@@ -67,6 +68,10 @@ import {
   tokensToJson,
 } from './studio/design-tokens.ts'
 import { DESIGN_SYSTEM_PRESETS } from './studio/design-system-presets.ts'
+import {
+  filterValidDesignSystemStylesheetUrls,
+  tryAppendDesignSystemStylesheet,
+} from './studio/design-system-url.ts'
 import { importDesignTokensFromJson, mergeDesignTokens } from './studio/import-tokens.ts'
 import { downloadHtml, exportFrameToHtml } from './studio/html-export.ts'
 import {
@@ -83,6 +88,9 @@ import {
 import { applyPatch } from './studio/patch.ts'
 
 /** POP editor UI (imperative DOM). Domain model: `src/studio/`. Repo context: `AGENTS.md`. */
+
+/** Editor-only stylesheet links for design-system preview (see `syncEditorDesignSystemLinks`). */
+const POP_DS_LINK_ATTR = 'data-pop-ds'
 
 const POP_CLIPBOARD_VERSION = 1 as const
 const PASTE_OFFSET_WORLD = 10
@@ -133,6 +141,8 @@ export function mount(root: HTMLElement): void {
   let tokens: DesignTokens = {}
   /** Stylesheet URLs merged into exported HTML `<head>`. */
   let htmlExportStylesheets: string[] = []
+  /** User-uploaded HTML/CSS merged into HTML export and live iframe preview. */
+  let uploadedLibraryAssets: UploadedLibraryAsset[] = []
   /** When editing a component, scene roots are not frame roots. */
   let componentEditRoots: string[] | null = null
   let nodes = new Map<string, SceneNode>()
@@ -233,7 +243,7 @@ export function mount(root: HTMLElement): void {
       <header class="pop-chrome-min" role="banner">
         <div class="pop-chrome-min-inner">
           <h1 class="pop-title">POP</h1>
-          <p class="pop-sub" title="Vibe designing for web and mobile in the browser. Draw on the canvas, add images, then export SVG or HTML. Raster images become &lt;image&gt; in the SVG (embedded), not auto-traced."><span class="pop-sub-lead">Vibe designing for web &amp; mobile.</span> Sketch UI and graphics on the canvas—shapes, text &amp; images—then export SVG or HTML.</p>
+          <p class="pop-sub" title="Vibe designing for web and mobile in the browser. You edit in an HTML/CSS studio; an SVG overlay keeps selection and tools. Export SVG or HTML. Raster images embed in both."><span class="pop-sub-lead">Vibe designing for web &amp; mobile.</span> Build screens as HTML/CSS on the artboard—shapes, text &amp; images—then export HTML or SVG.</p>
         </div>
       </header>
       <div class="pop-main">
@@ -458,7 +468,7 @@ export function mount(root: HTMLElement): void {
                 <div class="pop-props" id="pop-group-layout-props" hidden>
                   <h2 class="pop-panel-h">HTML: children in group</h2>
                   <p class="pop-panel-desc" id="pop-group-layout-desc">
-                    Canvas stays the same. This only changes the exported HTML/CSS: either keep each child’s position, or lay children out with flexbox (stack).
+                    The HTML studio view stays the same. This only changes exported HTML/CSS: either keep each child’s position, or lay children out with flexbox (stack).
                   </p>
                   <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Layout</span>
                     <select id="pop-group-layout" aria-label="How children are arranged in exported HTML" aria-describedby="pop-group-layout-desc">
@@ -500,6 +510,26 @@ export function mount(root: HTMLElement): void {
                     <button type="button" class="pop-btn" id="pop-token-import-pick">Import tokens…</button>
                     <label class="pop-check"><input type="checkbox" id="pop-token-import-replace" /> Replace all</label>
                   </div>
+                  <div class="pop-field pop-field-fs pop-ds-url-block" role="group" aria-label="Load design system stylesheet">
+                    <span class="pop-field-lbl">Load design system CSS</span>
+                    <p class="pop-panel-desc pop-ds-url-desc">
+                      Paste a jsDelivr / unpkg / Google Fonts URL, or npm shorthand (e.g.
+                      <span class="pop-code">@salt-ds/core@1.59.0/css/salt-core.css</span>). Adds to the list below and
+                      preview in the editor.
+                    </p>
+                    <div class="pop-ds-url-row">
+                      <input
+                        type="text"
+                        id="pop-ds-url-input"
+                        class="pop-input pop-ds-url-input"
+                        placeholder="https://cdn.jsdelivr.net/npm/… or @scope/pkg@version/path.css"
+                        autocomplete="off"
+                        aria-label="Design system stylesheet URL or npm shorthand"
+                      />
+                      <button type="button" class="pop-btn" id="pop-ds-url-load">Load</button>
+                    </div>
+                    <p class="pop-hint pop-ds-url-feedback" id="pop-ds-url-feedback" aria-live="polite"></p>
+                  </div>
                   <label class="pop-field pop-field-fs">
                     <span class="pop-field-lbl">HTML export stylesheets</span>
                     <textarea id="pop-html-export-stylesheets" class="pop-ai-prompt" rows="3" placeholder="One URL per line" aria-label="Stylesheet URLs for exported HTML"></textarea>
@@ -510,6 +540,18 @@ export function mount(root: HTMLElement): void {
                       <option value="">Apply preset…</option>
                     </select>
                   </label>
+                  <h3 class="pop-panel-subh">Uploaded library (HTML/CSS)</h3>
+                  <p class="pop-panel-desc">
+                    Add files to inject into the HTML export and the live preview. Saved with your document in localStorage.
+                  </p>
+                  <div class="pop-token-handoff pop-library-upload-row" role="group" aria-label="Upload library files">
+                    <input type="file" id="pop-library-css-file" accept=".css,text/css" hidden />
+                    <input type="file" id="pop-library-html-file" accept=".html,.htm,text/html" hidden />
+                    <button type="button" class="pop-btn" id="pop-library-css-pick">Add CSS…</button>
+                    <button type="button" class="pop-btn" id="pop-library-html-pick">Add HTML…</button>
+                    <button type="button" class="pop-btn pop-danger" id="pop-library-assets-clear">Clear all</button>
+                  </div>
+                  <ul class="pop-library-assets-list" id="pop-library-assets-list" aria-label="Uploaded library files"></ul>
                 </div>
                 <div class="pop-props pop-props-tight">
                   <div class="pop-symmetry">
@@ -521,23 +563,30 @@ export function mount(root: HTMLElement): void {
             </div>
           </div>
         </div>
-        <div class="pop-canvas-wrap" title="⌘+scroll to pan · Ctrl+scroll or pinch to zoom toward the pointer">
-          <svg class="pop-canvas" id="pop-svg" viewBox="0 0 ${VIEW_W} ${VIEW_H}" width="${VIEW_W}" height="${VIEW_H}" role="img" aria-label="Vibe designing canvas for web and mobile layouts">
-            <g id="pop-viewport" transform="translate(0 0) scale(1)">
-              <rect class="pop-canvas-bg" id="pop-canvas-bg" x="0" y="0" width="${VIEW_W}" height="${VIEW_H}" fill="transparent" pointer-events="none"/>
-              <g id="pop-frame-outlines" pointer-events="none"></g>
-              <g id="pop-guides-back" pointer-events="none"></g>
-              <g id="pop-items"></g>
-              <g id="pop-handles"></g>
-              <g id="pop-guides-front" pointer-events="none"></g>
-            </g>
-          </svg>
-          <div class="pop-zoom-dock" role="toolbar" aria-label="Canvas zoom">
-            <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out-dock" aria-label="Zoom out" title="Zoom out">−</button>
-            <span class="pop-zoom-pct pop-zoom-dock-readout" id="pop-zoom-pct-dock" aria-live="polite">100%</span>
-            <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in-dock" aria-label="Zoom in" title="Zoom in">+</button>
-            <button type="button" class="pop-btn pop-zoom-dock-fit" id="pop-zoom-fit-dock" title="Fit entire canvas in view">Fit</button>
-            <button type="button" class="pop-btn pop-zoom-dock-reset" id="pop-zoom-reset-dock" title="Reset zoom to 100% and pan">100%</button>
+        <div class="pop-studio-stage" aria-label="HTML and CSS studio">
+          <div class="pop-html-studio-wrap" title="⌘+scroll to pan · Ctrl+scroll or pinch to zoom toward the pointer">
+            <iframe
+              class="pop-html-studio-iframe"
+              id="pop-html-preview"
+              title="HTML and CSS studio — active frame"
+            ></iframe>
+            <svg class="pop-canvas pop-canvas-html-overlay" id="pop-svg" viewBox="0 0 ${VIEW_W} ${VIEW_H}" width="${VIEW_W}" height="${VIEW_H}" role="img" aria-label="Layout editor overlay — select and drag layers; HTML/CSS renders beneath">
+              <g id="pop-viewport" transform="translate(0 0) scale(1)">
+                <rect class="pop-canvas-bg" id="pop-canvas-bg" x="0" y="0" width="${VIEW_W}" height="${VIEW_H}" fill="transparent" pointer-events="none"/>
+                <g id="pop-frame-outlines" pointer-events="none"></g>
+                <g id="pop-guides-back" pointer-events="none"></g>
+                <g id="pop-items"></g>
+                <g id="pop-handles"></g>
+                <g id="pop-guides-front" pointer-events="none"></g>
+              </g>
+            </svg>
+            <div class="pop-zoom-dock" role="toolbar" aria-label="Canvas zoom">
+              <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out-dock" aria-label="Zoom out" title="Zoom out">−</button>
+              <span class="pop-zoom-pct pop-zoom-dock-readout" id="pop-zoom-pct-dock" aria-live="polite">100%</span>
+              <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in-dock" aria-label="Zoom in" title="Zoom in">+</button>
+              <button type="button" class="pop-btn pop-zoom-dock-fit" id="pop-zoom-fit-dock" title="Fit entire canvas in view">Fit</button>
+              <button type="button" class="pop-btn pop-zoom-dock-reset" id="pop-zoom-reset-dock" title="Reset zoom to 100% and pan">100%</button>
+            </div>
           </div>
         </div>
         <aside class="pop-ai-pane" aria-label="AI design assistant for vibe designing">
@@ -593,7 +642,7 @@ export function mount(root: HTMLElement): void {
 
   const svg = root.querySelector<SVGSVGElement>('#pop-svg')!
   const viewportG = root.querySelector<SVGGElement>('#pop-viewport')!
-  const canvasWrap = root.querySelector<HTMLElement>('.pop-canvas-wrap')!
+  const canvasWrap = root.querySelector<HTMLElement>('.pop-html-studio-wrap')!
   const itemsG = root.querySelector<SVGGElement>('#pop-items')!
   const handlesG = root.querySelector<SVGGElement>('#pop-handles')!
   const layerList = root.querySelector<HTMLUListElement>('#pop-layers')!
@@ -698,7 +747,17 @@ export function mount(root: HTMLElement): void {
   const btnTokenImportPick = root.querySelector<HTMLButtonElement>('#pop-token-import-pick')!
   const tokenImportReplace = root.querySelector<HTMLInputElement>('#pop-token-import-replace')!
   const taHtmlExportStylesheets = root.querySelector<HTMLTextAreaElement>('#pop-html-export-stylesheets')!
+  const inpDsUrl = root.querySelector<HTMLInputElement>('#pop-ds-url-input')!
+  const btnDsUrlLoad = root.querySelector<HTMLButtonElement>('#pop-ds-url-load')!
+  const elDsUrlFeedback = root.querySelector<HTMLParagraphElement>('#pop-ds-url-feedback')!
   const selDsPreset = root.querySelector<HTMLSelectElement>('#pop-ds-preset')!
+  const htmlPreviewIframe = root.querySelector<HTMLIFrameElement>('#pop-html-preview')!
+  const libraryAssetsList = root.querySelector<HTMLUListElement>('#pop-library-assets-list')!
+  const btnLibraryCssPick = root.querySelector<HTMLButtonElement>('#pop-library-css-pick')!
+  const btnLibraryHtmlPick = root.querySelector<HTMLButtonElement>('#pop-library-html-pick')!
+  const btnLibraryAssetsClear = root.querySelector<HTMLButtonElement>('#pop-library-assets-clear')!
+  const libraryCssFileInput = root.querySelector<HTMLInputElement>('#pop-library-css-file')!
+  const libraryHtmlFileInput = root.querySelector<HTMLInputElement>('#pop-library-html-file')!
   const aiKeyInput = root.querySelector<HTMLInputElement>('#pop-ai-key')!
   const aiModelSelect = root.querySelector<HTMLSelectElement>('#pop-ai-model')!
 
@@ -712,6 +771,78 @@ export function mount(root: HTMLElement): void {
   function syncHtmlExportStylesheetsUi(): void {
     taHtmlExportStylesheets.value = htmlExportStylesheets.join('\n')
   }
+
+  let dsUrlFeedbackTimer: ReturnType<typeof setTimeout> | null = null
+
+  function setDesignSystemUrlFeedback(message: string, kind: 'info' | 'err' | '' = 'info'): void {
+    elDsUrlFeedback.textContent = message
+    elDsUrlFeedback.classList.toggle('pop-ds-url-feedback-err', kind === 'err')
+    if (dsUrlFeedbackTimer) clearTimeout(dsUrlFeedbackTimer)
+    dsUrlFeedbackTimer = null
+    if (message && kind !== 'err') {
+      dsUrlFeedbackTimer = setTimeout(() => {
+        dsUrlFeedbackTimer = null
+        elDsUrlFeedback.textContent = ''
+        elDsUrlFeedback.classList.remove('pop-ds-url-feedback-err')
+      }, 4500)
+    }
+  }
+
+  /** Sync `<link data-pop-ds>` in `document.head` to validated stylesheet URLs (live preview). */
+  function syncEditorDesignSystemLinks(): void {
+    const head = document.head
+    for (const el of [...head.querySelectorAll(`link[${POP_DS_LINK_ATTR}]`)]) {
+      el.remove()
+    }
+    const valid = filterValidDesignSystemStylesheetUrls(htmlExportStylesheets)
+    for (const href of valid) {
+      const link = document.createElement('link')
+      link.rel = 'stylesheet'
+      link.href = href
+      link.setAttribute(POP_DS_LINK_ATTR, '')
+      link.addEventListener('error', () => {
+        console.warn('[POP] Failed to load design system stylesheet:', href)
+      })
+      head.appendChild(link)
+    }
+  }
+
+  function syncUploadedLibraryAssetsUi(): void {
+    libraryAssetsList.replaceChildren()
+    for (const a of uploadedLibraryAssets) {
+      const li = document.createElement('li')
+      li.className = 'pop-library-asset-row'
+      const meta = document.createElement('span')
+      meta.className = 'pop-library-asset-meta'
+      meta.textContent = `${a.kind === 'css' ? 'CSS' : 'HTML'} · ${a.name}`
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'pop-btn pop-library-asset-remove'
+      btn.textContent = 'Remove'
+      btn.addEventListener('click', () => {
+        uploadedLibraryAssets = uploadedLibraryAssets.filter((x) => x.id !== a.id)
+        syncUploadedLibraryAssetsUi()
+        schedulePersist()
+        renderHtmlPreview()
+      })
+      li.append(meta, btn)
+      libraryAssetsList.appendChild(li)
+    }
+  }
+
+  function renderHtmlPreview(): void {
+    const f = getActiveFrame()
+    const html = exportFrameToHtml(f, nodes, definitions, tokens, {
+      title: docName,
+      stylesheetUrls: htmlExportStylesheets,
+      uploadedLibraryAssets,
+      studioPreview: { worldW, worldH },
+    })
+    htmlPreviewIframe.srcdoc = html
+    htmlPreviewIframe.style.width = `${worldW}px`
+    htmlPreviewIframe.style.height = `${worldH}px`
+  }
+
   const aiLogEl = root.querySelector<HTMLElement>('#pop-ai-log')!
   const aiPromptTextarea = root.querySelector<HTMLTextAreaElement>('#pop-ai-prompt')!
   const btnAiSend = root.querySelector<HTMLButtonElement>('#pop-ai-send')!
@@ -1310,6 +1441,9 @@ export function mount(root: HTMLElement): void {
         name: docName,
         updatedAt: new Date().toISOString(),
         htmlExportStylesheets: [...htmlExportStylesheets],
+        ...(uploadedLibraryAssets.length > 0
+          ? { uploadedLibraryAssets: uploadedLibraryAssets.map((a) => ({ ...a })) }
+          : {}),
       },
       tokens,
       frames: JSON.parse(JSON.stringify(frames)) as PopFrame[],
@@ -1390,6 +1524,19 @@ export function mount(root: HTMLElement): void {
       doc.meta.htmlExportStylesheets.every((x) => typeof x === 'string')
         ? [...doc.meta.htmlExportStylesheets]
         : []
+    uploadedLibraryAssets =
+      Array.isArray(doc.meta.uploadedLibraryAssets) &&
+      doc.meta.uploadedLibraryAssets.every(
+        (x) =>
+          x &&
+          typeof x === 'object' &&
+          typeof (x as UploadedLibraryAsset).id === 'string' &&
+          typeof (x as UploadedLibraryAsset).name === 'string' &&
+          typeof (x as UploadedLibraryAsset).content === 'string' &&
+          ((x as UploadedLibraryAsset).kind === 'css' || (x as UploadedLibraryAsset).kind === 'html'),
+      )
+        ? doc.meta.uploadedLibraryAssets.map((a) => ({ ...a }))
+        : []
     frames = JSON.parse(JSON.stringify(doc.frames)) as PopFrame[]
     activeFrameId = doc.activeFrameId
     if (!frames.some((f) => f.id === activeFrameId)) activeFrameId = frames[0]!.id
@@ -1415,6 +1562,9 @@ export function mount(root: HTMLElement): void {
     renderTokensPanel()
     refreshFillStrokeTokenSelects()
     syncHtmlExportStylesheetsUi()
+    syncUploadedLibraryAssetsUi()
+    syncEditorDesignSystemLinks()
+    renderHtmlPreview()
   }
 
   try {
@@ -1481,6 +1631,8 @@ export function mount(root: HTMLElement): void {
   renderTokensPanel()
   refreshFillStrokeTokenSelects()
   syncHtmlExportStylesheetsUi()
+  syncUploadedLibraryAssetsUi()
+  syncEditorDesignSystemLinks()
 
   let hintTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -3324,6 +3476,7 @@ export function mount(root: HTMLElement): void {
     if (!stylePanelFocused) syncStyleFromSelection()
     syncTypographyPanel()
     syncGroupLayoutPanel()
+    renderHtmlPreview()
     schedulePersist()
   }
 
@@ -3657,7 +3810,37 @@ Current document (PopDocumentV3 JSON):\n${docJson}\n\nUser request:\n${prompt}\n
 
   taHtmlExportStylesheets.addEventListener('input', () => {
     htmlExportStylesheets = parseStylesheetLines(taHtmlExportStylesheets.value)
+    syncEditorDesignSystemLinks()
     schedulePersist()
+    renderHtmlPreview()
+  })
+
+  function loadDesignSystemUrlFromInput(): void {
+    const raw = inpDsUrl.value
+    const r = tryAppendDesignSystemStylesheet(htmlExportStylesheets, raw)
+    if (!r.ok) {
+      setDesignSystemUrlFeedback(r.message, 'err')
+      return
+    }
+    htmlExportStylesheets = r.urls
+    syncHtmlExportStylesheetsUi()
+    syncEditorDesignSystemLinks()
+    schedulePersist()
+    renderHtmlPreview()
+    inpDsUrl.value = ''
+    if (r.appended) {
+      setDesignSystemUrlFeedback('Added to HTML export stylesheets and editor preview.')
+    } else {
+      setDesignSystemUrlFeedback('That URL is already in the list.')
+    }
+  }
+
+  btnDsUrlLoad.addEventListener('click', () => loadDesignSystemUrlFromInput())
+  inpDsUrl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      loadDesignSystemUrlFromInput()
+    }
   })
 
   selDsPreset.addEventListener('change', () => {
@@ -3668,7 +3851,49 @@ Current document (PopDocumentV3 JSON):\n${docJson}\n\nUser request:\n${prompt}\n
     if (!p || p.id === 'none') return
     htmlExportStylesheets = [...p.stylesheetUrls]
     syncHtmlExportStylesheetsUi()
+    syncEditorDesignSystemLinks()
     schedulePersist()
+    renderHtmlPreview()
+  })
+
+  function addUploadedLibraryAsset(kind: 'css' | 'html', name: string, content: string): void {
+    uploadedLibraryAssets = [...uploadedLibraryAssets, { id: newId(), name, kind, content }]
+    syncUploadedLibraryAssetsUi()
+    schedulePersist()
+    renderHtmlPreview()
+  }
+
+  btnLibraryCssPick.addEventListener('click', () => libraryCssFileInput.click())
+  btnLibraryHtmlPick.addEventListener('click', () => libraryHtmlFileInput.click())
+
+  libraryCssFileInput.addEventListener('change', () => {
+    const file = libraryCssFileInput.files?.[0]
+    libraryCssFileInput.value = ''
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      addUploadedLibraryAsset('css', file.name || 'library.css', String(reader.result ?? ''))
+    }
+    reader.readAsText(file)
+  })
+
+  libraryHtmlFileInput.addEventListener('change', () => {
+    const file = libraryHtmlFileInput.files?.[0]
+    libraryHtmlFileInput.value = ''
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      addUploadedLibraryAsset('html', file.name || 'library.html', String(reader.result ?? ''))
+    }
+    reader.readAsText(file)
+  })
+
+  btnLibraryAssetsClear.addEventListener('click', () => {
+    if (uploadedLibraryAssets.length === 0) return
+    uploadedLibraryAssets = []
+    syncUploadedLibraryAssetsUi()
+    schedulePersist()
+    renderHtmlPreview()
   })
 
   strokeWInput.addEventListener('input', () => {
@@ -4198,6 +4423,7 @@ ${parts}
     const html = exportFrameToHtml(f, nodes, definitions, tokens, {
       title: docName,
       stylesheetUrls: htmlExportStylesheets,
+      uploadedLibraryAssets,
     })
     downloadHtml(html, `${(f.label || 'frame').replace(/\s+/g, '-')}.html`)
   })
@@ -4208,6 +4434,7 @@ ${parts}
       const html = exportFrameToHtml(f, nodes, definitions, tokens, {
         title: `${docName} · ${f.label}`,
         stylesheetUrls: htmlExportStylesheets,
+        uploadedLibraryAssets,
       })
       const name = `${(f.label || 'frame').replace(/\s+/g, '-')}.html`
       window.setTimeout(() => downloadHtml(html, name), delay)

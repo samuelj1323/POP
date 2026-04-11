@@ -1091,10 +1091,14 @@ body {
     flex: 0 0 min(72vw, 400px);
   }
 
-  .pop-canvas-wrap {
+  .pop-studio-stage {
     grid-column: 1;
     grid-row: 2;
     margin: 0 0.35rem;
+    min-height: min(62vh, 720px);
+  }
+
+  .pop-html-studio-wrap {
     border-radius: 12px;
   }
 
@@ -1241,6 +1245,51 @@ body {
   flex-wrap: wrap;
   gap: 0.35rem;
   margin-top: 0.6rem;
+}
+
+.pop-ds-url-block {
+  margin-bottom: 0.5rem;
+}
+
+.pop-ds-url-desc {
+  margin-top: 0.25rem;
+  margin-bottom: 0.45rem;
+  font-size: 0.78rem;
+}
+
+.pop-ds-url-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  min-width: 0;
+}
+
+.pop-input.pop-ds-url-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.pop-input.pop-ds-url-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(196, 181, 253, 0.35);
+}
+
+.pop-ds-url-feedback {
+  margin: 0.35rem 0 0;
+  min-height: 1.2em;
+}
+
+.pop-ds-url-feedback-err {
+  color: var(--danger);
 }
 
 .pop-parent-chain {
@@ -1511,19 +1560,32 @@ body {
   color: var(--text);
 }
 
-.pop-canvas-wrap {
+.pop-studio-stage {
   position: relative;
   grid-column: 2;
   grid-row: 1;
   z-index: 1;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   height: 100%;
   align-self: stretch;
   margin: 0.35rem 0;
+  min-width: 0;
+}
+
+.pop-html-studio-wrap {
+  position: relative;
+  flex: 1;
+  z-index: 1;
+  min-height: 0;
+  height: 100%;
+  min-width: 0;
+  align-self: stretch;
+  margin: 0;
   border: 1px solid var(--border);
   border-radius: 12px;
   overflow: auto;
-  /* Single grid: lines synced from JS to pan/zoom/letterbox (--pop-grid-*). Never plain fill only. */
   background-color: var(--bg);
   background-image:
     linear-gradient(var(--canvas-line) 1px, transparent 1px),
@@ -1531,9 +1593,68 @@ body {
   background-size: var(--pop-grid-pitch, 16px) var(--pop-grid-pitch, 16px);
   background-position: var(--pop-grid-ox, 0px) var(--pop-grid-oy, 0px);
   padding: 0;
+}
+
+.pop-html-studio-iframe {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  pointer-events: none;
+  background: transparent;
+}
+
+/* Layer shapes render as HTML beneath; SVG keeps hit targets and handles. */
+.pop-html-studio-wrap #pop-items,
+.pop-html-studio-wrap #pop-items * {
+  fill-opacity: 0 !important;
+  stroke-opacity: 0 !important;
+}
+
+.pop-html-studio-wrap #pop-items image {
+  opacity: 0 !important;
+}
+
+.pop-library-upload-row {
+  flex-wrap: wrap;
+}
+
+.pop-library-assets-list {
+  list-style: none;
+  margin: 0.35rem 0 0;
+  padding: 0;
   display: flex;
-  align-items: stretch;
-  justify-content: stretch;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.pop-library-asset-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.45rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 0.78rem;
+}
+
+.pop-library-asset-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.pop-library-asset-remove {
+  flex-shrink: 0;
+  padding: 0.25rem 0.45rem;
+  font-size: 0.72rem;
 }
 
 .pop-zoom-dock {
@@ -1599,6 +1720,19 @@ body {
 
 .pop-canvas.pop-canvas-draw {
   cursor: crosshair;
+}
+
+.pop-canvas.pop-canvas-html-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  flex: none !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
 }
 
 .pop-canvas-bg {

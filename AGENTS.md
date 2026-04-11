@@ -18,7 +18,7 @@ This repository is **Pop**, a browser-based **vibe designing** platform for **we
 | `index.html` | Mounts `#app`, loads `src/main.ts` |
 | `src/main.ts` | `mount(App, { target })` — Svelte entry |
 | `src/App.svelte` | Thin shell: `onMount` → `mount(host)` from `svg-studio.ts` |
-| `src/svg-studio.ts` | **Main editor**: imperative DOM (large file), `export function mount(root: HTMLElement)` |
+| `src/svg-studio.ts` | **Main editor**: HTML/CSS studio (iframe `srcdoc` = active frame); SVG overlay for selection/tools and invisible hit targets for layers (`#pop-items` fill/stroke hidden in CSS) |
 | `src/style.css` | Global styles |
 
 **Rule of thumb:** New UI that belongs in the chrome/canvas/toolbar usually lives in **`svg-studio.ts`** (or is extracted from it). New pure logic, types, and serialization live under **`src/studio/`**.
@@ -28,18 +28,20 @@ This repository is **Pop**, a browser-based **vibe designing** platform for **we
 | Module | Contents |
 |--------|----------|
 | `scene-types.ts` | `Tool`, `SceneNode` (rect, ellipse, text, image, group, instance), `ComponentDefinition`, `GroupLayout`, `HtmlExportRole` |
-| `document.ts` | `PopDocumentV3`, `PopFrame`, `DesignTokens`, world bounds, migration helpers |
+| `document.ts` | `PopDocumentV3`, `PopFrame`, `DesignTokens`, `UploadedLibraryAsset` (uploaded HTML/CSS library files in `meta.uploadedLibraryAssets`), world bounds, migration helpers |
 | `persistence.ts` | localStorage keys `STORAGE_KEY_V1` … `V3`, load/save, `normalizeSceneNode` |
 | `patch.ts` | `PatchOp`, `applyPatch` — apply structured edits to `PopDocumentV3` (used by the Design assistant) |
 | `llm-design.ts` | `fetchDesignLlmReply`, `buildGeminiGenerateContentUrl`, `GOOGLE_AI_STUDIO_GEMINI_MODELS`, `buildDesignLlmSystemPrompt`, `parsePatchOpsFromLlmText`, AI settings in `localStorage` |
 | `svg-export.ts` | SVG fragment generation, download |
-| `html-export.ts` | HTML export from frames |
+| `html-export.ts` | HTML export from frames; optional `uploadedLibraryAssets` on `HtmlExportOptions` for `<style>` / body fragments (used by iframe preview and download) |
 | `layout-geometry.ts` | Bounds, resize handles, hierarchy |
 | `snap.ts` | Snapping |
 | `constants.ts` | e.g. `VIEW_W`/`VIEW_H` (default frame 960×540), grid, scale limits |
 | `id.ts` | `newId()` for nodes |
 | `math.ts` | `clamp` and small math helpers |
 | `color-palette.ts` | Palette / theme helpers |
+| `design-system-url.ts` | Validate npm CDN / Fonts stylesheet URLs, npm shorthand → jsDelivr, dedupe helpers |
+| `design-system-presets.ts` | Curated HTML-export stylesheet presets (e.g. Salt, Material fonts) |
 
 Current document version is **`PopDocumentV3`** (`v: 3`); persistence uses **`STORAGE_KEY_V3`**.
 

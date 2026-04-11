@@ -1,4 +1,4 @@
-import type { DesignTokens, PopFrame } from './document.ts'
+import type { DesignTokens, PopFrame, UploadedLibraryAsset } from './document.ts'
 import { resolveColorFromTokens, tokenSlug, tokensToCssRootBlock } from './design-tokens.ts'
 import { worldFrame } from './layout-geometry.ts'
 import type { ComponentDefinition, HtmlExportRole, SceneNode } from './scene-types.ts'
@@ -9,6 +9,16 @@ function escapeHtml(s: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
+}
+
+/** Avoid closing the hosting `<style>` when user CSS contains `</style`. */
+function escapeCssForStyleElement(css: string): string {
+  return css.replace(/<\/style/gi, '<\\/style')
+}
+
+/** Reduce script injection when appending raw HTML fragments after the frame. */
+function escapeHtmlFragmentForBody(html: string): string {
+  return html.replace(/<\/script/gi, '<\\/script')
 }
 
 function px(n: number): string {
@@ -52,6 +62,16 @@ export type HtmlExportOptions = {
   title?: string
   /** Injected as `<link rel="stylesheet">` before inline styles (design system CSS, fonts). */
   stylesheetUrls?: string[]
+  /**
+   * User-uploaded assets: `css` → extra `<style>` blocks; `html` → appended after the frame `div`.
+   * Same data is used for file download and live `srcdoc` preview.
+   */
+  uploadedLibraryAssets?: UploadedLibraryAsset[]
+  /**
+   * In-app HTML studio: world-sized document with the frame absolutely positioned at its world (x,y).
+   * Omit for downloaded HTML (centered frame, page-like layout).
+   */
+  studioPreview?: { worldW: number; worldH: number }
 }
 
 export function exportFrameToHtml(
@@ -70,21 +90,49 @@ export function exportFrameToHtml(
     .map((href) => `  <link rel="stylesheet" href="${escapeHtml(href)}" />`)
     .join('\n')
 
+  const assets = options?.uploadedLibraryAssets ?? []
+  const uploadedStyleTags = assets
+    .filter((a): a is UploadedLibraryAsset & { kind: 'css' } => a.kind === 'css')
+    .map(
+      (a) =>
+        `  <style type="text/css" data-pop-library="${escapeHtml(a.name)}" data-pop-library-id="${escapeHtml(a.id)}">\n${escapeCssForStyleElement(a.content)}\n  </style>`,
+    )
+    .join('\n')
+
+  const uploadedBodySuffix = assets
+    .filter((a): a is UploadedLibraryAsset & { kind: 'html' } => a.kind === 'html')
+    .map(
+      (a) =>
+        `\n  <div class="pop-uploaded-html" data-pop-library="${escapeHtml(a.name)}" data-pop-library-id="${escapeHtml(a.id)}">\n${escapeHtmlFragmentForBody(a.content)}\n  </div>`,
+    )
+    .join('\n')
+
+  const sp = options?.studioPreview
+  const bodyClass = sp ? ' class="pop-studio-preview-body"' : ''
+  const bodyCss = sp
+    ? `margin: 0; position: relative; min-width: ${px(sp.worldW)}; min-height: ${px(sp.worldH)}; font-family: system-ui, sans-serif; background: #0a0612;`
+    : `margin: 0; min-height: 100vh; font-family: system-ui, sans-serif;`
+  const frameCss = sp
+    ? `position: absolute; left: ${px(frame.x)}; top: ${px(frame.y)}; width: ${px(frame.width)}; height: ${px(frame.height)}; margin: 0;`
+    : `position: relative; width: ${px(frame.width)}; height: ${px(frame.height)}; margin: 2rem auto;`
+
+  const uploadedBodyBlock =
+    uploadedBodySuffix && sp
+      ? `\n  <div class="pop-uploaded-html-host" style="position:absolute;left:0;top:${px(sp.worldH)};min-width:${px(sp.worldW)};">${uploadedBodySuffix}\n  </div>`
+      : uploadedBodySuffix
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${title}</title>
-${extraLinks ? `${extraLinks}\n` : ''}  <style>
+${extraLinks ? `${extraLinks}\n` : ''}${uploadedStyleTags ? `${uploadedStyleTags}\n` : ''}  <style>
     * { box-sizing: border-box; }
     ${cssVars}
-    body { margin: 0; min-height: 100vh; font-family: system-ui, sans-serif; }
+    body${sp ? '.pop-studio-preview-body' : ''} { ${bodyCss} }
     .pop-frame {
-      position: relative;
-      width: ${px(frame.width)};
-      height: ${px(frame.height)};
-      margin: 2rem auto;
+      ${frameCss}
       background: #181c27;
       overflow: hidden;
     }
@@ -94,14 +142,20 @@ ${extraLinks ? `${extraLinks}\n` : ''}  <style>
     button.pop-abs { font: inherit; cursor: default; border: none; text-align: inherit; }
   </style>
 </head>
-<body>
+<body${bodyClass}>
   <div class="pop-frame" data-pop-frame="${escapeHtml(frame.id)}" data-pop-frame-label="${escapeHtml(frame.label)}">
 ${body}
-  </div>
+  </div>${uploadedBodyBlock}
 </body>
 </html>
 `
 }
+
+/**
+ * Builds a full HTML document string for one frame (preview `srcdoc` and {@link downloadHtml}).
+ * Alias of {@link exportFrameToHtml} for call sites that emphasize “build” over “export”.
+ */
+export const buildHtmlDocumentForFrame = exportFrameToHtml
 
 function emitRoot(
   rootId: string,
