@@ -1,4 +1,4 @@
-import type { PatchOp } from './patch.ts'
+import type { VibePatchOp } from './vibe-patch.ts'
 
 const AI_STORAGE_ENDPOINT = 'pop-ai-endpoint'
 const AI_STORAGE_KEY = 'pop-ai-key'
@@ -69,41 +69,33 @@ export function writeAiModel(model: string): void {
   }
 }
 
-/** Instructions for OpenAI-style chat completions that return patch ops JSON. */
-export function buildDesignLlmSystemPrompt(): string {
-  return `You are a design assistant for POP, a browser-based vibe designing platform: users sketch web and mobile screens, UI layouts, and graphics on an infinite SVG canvas, then export SVG or HTML. Frames act as artboards (e.g. mobile vs desktop); layers, groups, components, and design tokens support real product-style workflows. Interpret natural-language requests in that spirit—think responsive layouts, tap targets, hero sections, nav bars, cards, and marketing visuals when relevant.
+/** System prompt: library components + page placements; model returns patch ops JSON. */
+export function buildVibeDesignLlmSystemPrompt(): string {
+  return `You are a design assistant for POP, a browser-based vibe designing platform.
 
-You output ONLY valid JSON: either a JSON array of patch operations, or a single object {\"ops\": [...]}.
+There are two layers:
+1) **Library** — reusable components: each has an id, display name, and HTML fragment (inline CSS or <style> blocks).
+2) **Page** — ordered list of **placements**. Each placement has its own id and references a library component via componentId. The iframe preview renders **only** these placements, in order—not the whole library.
+
+You output ONLY valid JSON: either a JSON array of patch operations, or a single object {"ops": [...]}.
 
 Each operation is an object with an "op" field. Allowed ops:
 
-- {"op":"setMeta","name?":string}
-- {"op":"setTokens","tokens":object} — merge into design tokens { colors?, radii?, space? }
-- {"op":"setToken","namespace":"colors"|"radii"|"space","key":string,"value":string|number}
-- {"op":"addFrame","frame":{"label":string,"x":number,"y":number,"width":number,"height":number,"id?":string,"rootIds?":string[]}}
-- {"op":"updateFrame","id":string,"patch":{"label?","x?","y?","width?","height?"}}
-- {"op":"removeFrame","id":string} — cannot remove the last frame
-- {"op":"setActiveFrame","id":string}
-- {"op":"addNode","node":SceneNode} — full node with new UUID "id", correct "parentId", type rect|ellipse|text|image|group|instance
-- {"op":"updateNode","id":string,"patch":object} — partial fields merged into existing node
-- {"op":"removeNode","id":string}
-- {"op":"setFrameRoots","frameId":string,"rootIds":string[]}
+**Library**
+- {"op":"addComponent","component":{"name":string,"html":string,"id"?:string}} — adds a definition to the library (not automatically on the page). Optional id must be a new UUID if provided.
+- {"op":"updateComponent","id":string,"patch":{"name"?:string,"html"?:string}} — merge into an existing library component.
+- {"op":"removeComponent","id":string} — removes from library and removes all page placements that reference that componentId.
 
-Scene nodes (addNode / updateNode) must match POP schema:
-- rect: id, parentId, type "rect", x, y, width, height, fill, stroke, strokeWidth, rx, opacity (0–1)
-- ellipse: same without rx (no rx on ellipse)
-- text: id, parentId, type "text", x, y, width, height, content, fontSize, fill, opacity, fontFamily, fontWeight, letterSpacing, lineHeight
-- image: href (data URL or URL), dimensions, opacity
-- group: childIds array, x,y,width,height, optional layout, exportRole
-- instance: componentId, dimensions
+**Page (preview)**
+- {"op":"addPagePlacement","componentId":string,"placementId"?:string} — append one instance of a library component to the page. componentId must exist in the library. Optional placementId = new UUID if omitted.
+- {"op":"removePagePlacement","id":string} — remove one placement by its id (from pagePlacements in context).
+- {"op":"movePagePlacement","id":string,"toIndex":number} — move the placement to a zero-based index in the current page list after removal (0 = top; use length to append).
 
-For NEW nodes use fresh UUID strings (RFC4122). parentId is null for frame roots; add new roots with setFrameRoots including previous roots plus the new id, in paint order (later = on top).
-
-Prefer small, safe edits: updateNode for style moves, addNode + setFrameRoots for new shapes. Do not invent node ids: use ids from the document for updates, new UUIDs only for addNode.
-
-When the user describes web or mobile UI, place and size elements coherently within the relevant frame (readable text sizes, sensible spacing). When they ask for multiple screen sizes, use separate frames or clear spatial separation.
-
-No markdown, no commentary outside the JSON.`
+Rules:
+- Use exact "id" / "componentId" / placement "id" values from the user context JSON.
+- Prefer small, safe edits. To change page order, use movePagePlacement.
+- HTML fragments should be suitable inside a <section> wrapper (no <!DOCTYPE>).
+- No markdown, no commentary outside the JSON.`
 }
 
 export function stripMarkdownJsonFence(s: string): string {
@@ -116,13 +108,45 @@ export function stripMarkdownJsonFence(s: string): string {
   return t
 }
 
-function isPatchOp(x: unknown): x is PatchOp {
+function isVibePatchOp(x: unknown): x is VibePatchOp {
   if (!x || typeof x !== 'object') return false
   const o = x as Record<string, unknown>
-  return typeof o.op === 'string'
+  if (typeof o.op !== 'string') return false
+  switch (o.op) {
+    case 'addComponent': {
+      const c = o.component as Record<string, unknown> | undefined
+      if (!c || typeof c !== 'object') return false
+      if (typeof c.name !== 'string' || typeof c.html !== 'string') return false
+      if (c.id !== undefined && typeof c.id !== 'string') return false
+      return true
+    }
+    case 'updateComponent': {
+      if (typeof o.id !== 'string') return false
+      const p = o.patch as Record<string, unknown> | undefined
+      if (!p || typeof p !== 'object') return false
+      if (p.name !== undefined && typeof p.name !== 'string') return false
+      if (p.html !== undefined && typeof p.html !== 'string') return false
+      return true
+    }
+    case 'removeComponent':
+      return typeof o.id === 'string'
+    case 'addPagePlacement': {
+      if (typeof o.componentId !== 'string') return false
+      if (o.placementId !== undefined && typeof o.placementId !== 'string') return false
+      return true
+    }
+    case 'removePagePlacement':
+      return typeof o.id === 'string'
+    case 'movePagePlacement':
+      return typeof o.id === 'string' && typeof o.toIndex === 'number' && Number.isFinite(o.toIndex)
+    default:
+      return false
+  }
 }
 
-export function parsePatchOpsFromLlmText(text: string): { ok: true; ops: PatchOp[] } | { ok: false; error: string } {
+export function parseVibePatchOpsFromLlmText(
+  text: string
+): { ok: true; ops: VibePatchOp[] } | { ok: false; error: string } {
   const raw = stripMarkdownJsonFence(text)
   let parsed: unknown
   try {
@@ -136,10 +160,10 @@ export function parsePatchOpsFromLlmText(text: string): { ok: true; ops: PatchOp
     list = (parsed as { ops: unknown[] }).ops
   }
   if (!list) return { ok: false, error: 'Expected a JSON array or { "ops": [...] }' }
-  const ops: PatchOp[] = []
+  const ops: VibePatchOp[] = []
   for (let i = 0; i < list.length; i++) {
     const item = list[i]
-    if (!isPatchOp(item)) return { ok: false, error: `Item ${i} is not a valid patch op` }
+    if (!isVibePatchOp(item)) return { ok: false, error: `Item ${i} is not a valid vibe patch op` }
     ops.push(item)
   }
   return { ok: true, ops }

@@ -1,6 +1,6 @@
 {
   "name": "pop",
-  "description": "SVG canvas editor — see AGENTS.md for architecture and LLM-oriented context.",
+  "description": "Vibe designing platform — named HTML components, iframe preview, AI assistant. See AGENTS.md.",
   "private": true,
   "version": "0.0.0",
   "type": "module",
