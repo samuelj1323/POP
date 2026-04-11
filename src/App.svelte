@@ -66,6 +66,7 @@
   let aiUserMessage = $state('')
   let aiChatMessages = $state<AiChatMessage[]>([])
   let aiBusy = $state(false)
+  let collapsedPlacements = $state<Record<string, boolean>>({})
   let abortCtl: AbortController | null = null
 
   const aiThreadScrollAction: Action<HTMLDivElement, AiChatMessage[]> = (node, _messages) => {
@@ -182,7 +183,21 @@
     doc = { ...doc, pagePlacements: nextPlacements }
   }
 
+  function isPlacementCollapsed(placementId: string): boolean {
+    return collapsedPlacements[placementId] ?? false
+  }
+
+  function togglePlacementCollapsed(placementId: string): void {
+    collapsedPlacements = {
+      ...collapsedPlacements,
+      [placementId]: !isPlacementCollapsed(placementId),
+    }
+  }
+
   function removePlacement(placementId: string): void {
+    const nextCollapsedPlacements = { ...collapsedPlacements }
+    delete nextCollapsedPlacements[placementId]
+    collapsedPlacements = nextCollapsedPlacements
     doc = {
       ...doc,
       pagePlacements: doc.pagePlacements.filter((p) => p.id !== placementId),
@@ -589,280 +604,294 @@
           <ul class="vibe-page-list">
             {#each doc.pagePlacements as p, idx (p.id)}
               {@const placementTokens = placementTemplateTokens(p)}
-              <li class="vibe-page-item">
+              {@const placementCollapsed = isPlacementCollapsed(p.id)}
+              <li class="vibe-page-item" class:vibe-page-item--collapsed={placementCollapsed}>
                 <div class="vibe-page-item-main">
                   <span class="vibe-page-name">{componentNameForPlacement(p)}</span>
-                  <span class="vibe-page-id" title={p.id}>{p.id.slice(0, 8)}…</span>
-                </div>
-
-                <div class="vibe-inspector-presets">
-                  <span class="vibe-inspector-section" style="margin-top:0">Presets</span>
-                  <div class="vibe-inspector-preset-btns">
+                  <div class="vibe-page-item-main-right">
+                    <span class="vibe-page-id" title={p.id}>{p.id.slice(0, 8)}…</span>
                     <button
                       type="button"
-                      class="vibe-btn vibe-btn--small"
-                      title="No wrapper chrome—component HTML defines the surface"
-                      onclick={() => setPlacementLayoutPreset(p.id, 'default')}
+                      class="vibe-collapse-toggle"
+                      onclick={() => togglePlacementCollapsed(p.id)}
+                      aria-label={placementCollapsed ? 'Expand placement inspector' : 'Collapse placement inspector'}
+                      aria-expanded={!placementCollapsed}
+                      title={placementCollapsed ? 'Expand details' : 'Collapse details'}
                     >
-                      Plain
-                    </button>
-                    <button
-                      type="button"
-                      class="vibe-btn vibe-btn--small"
-                      onclick={() => setPlacementLayoutPreset(p.id, 'hero')}
-                    >
-                      Hero
-                    </button>
-                    <button
-                      type="button"
-                      class="vibe-btn vibe-btn--small"
-                      onclick={() => setPlacementLayoutPreset(p.id, 'card')}
-                    >
-                      Card
-                    </button>
-                    <button
-                      type="button"
-                      class="vibe-btn vibe-btn--small"
-                      onclick={() => setPlacementLayoutPreset(p.id, 'section')}
-                    >
-                      Section
-                    </button>
-                    <button
-                      type="button"
-                      class="vibe-btn vibe-btn--small"
-                      onclick={() => setPlacementLayoutPreset(p.id, 'ctaRow')}
-                    >
-                      CTA row
+                      {placementCollapsed ? '▸' : '▾'}
                     </button>
                   </div>
                 </div>
 
-                <p class="vibe-inspector-section">Layout</p>
-                <div class="vibe-inspector-grid">
-                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-wm">Width</label>
-                  <select
-                    id="vibe-pl-{p.id}-wm"
-                    class="vibe-select"
-                    value={p.layout.widthMode}
-                    onchange={(e) =>
-                      updatePlacementLayout(p.id, {
-                        widthMode: e.currentTarget.value as VibePlacementWidthMode,
-                      })}
-                  >
-                    <option value="fill">Fill (100%)</option>
-                    <option value="fixed">Fixed (px)</option>
-                    <option value="content">Hug content</option>
-                  </select>
-
-                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-al">Align</label>
-                  <select
-                    id="vibe-pl-{p.id}-al"
-                    class="vibe-select"
-                    value={p.layout.align}
-                    onchange={(e) =>
-                      updatePlacementLayout(p.id, {
-                        align: e.currentTarget.value as VibePlacementAlign,
-                      })}
-                  >
-                    <option value="stretch">Stretch</option>
-                    <option value="start">Start</option>
-                    <option value="center">Center</option>
-                    <option value="end">End</option>
-                  </select>
-                </div>
-                {#if p.layout.widthMode === 'fill'}
-                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-mw"
-                    >Max width (px, 0 = none)</label
-                  >
-                  <input
-                    id="vibe-pl-{p.id}-mw"
-                    class="vibe-input vibe-input--inspector-num"
-                    type="number"
-                    min="0"
-                    max="2400"
-                    value={p.layout.maxWidthPx}
-                    oninput={(e) =>
-                      updatePlacementLayout(p.id, {
-                        maxWidthPx: Number(e.currentTarget.value) || 0,
-                      })}
-                  />
-                {:else if p.layout.widthMode === 'fixed'}
-                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-wp">Width (px)</label>
-                  <input
-                    id="vibe-pl-{p.id}-wp"
-                    class="vibe-input vibe-input--inspector-num"
-                    type="number"
-                    min="80"
-                    max="2000"
-                    value={p.layout.widthPx}
-                    oninput={(e) =>
-                      updatePlacementLayout(p.id, {
-                        widthPx: Number(e.currentTarget.value) || 80,
-                      })}
-                  />
-                {/if}
-                <div class="vibe-inspector-grid" style="margin-top: 0.35rem">
-                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-mt">Margin T</label>
-                  <input
-                    id="vibe-pl-{p.id}-mt"
-                    class="vibe-input vibe-input--inspector-num"
-                    type="number"
-                    min="0"
-                    max="200"
-                    value={p.layout.marginTopPx}
-                    oninput={(e) =>
-                      updatePlacementLayout(p.id, {
-                        marginTopPx: Number(e.currentTarget.value) || 0,
-                      })}
-                  />
-                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-mb">Margin B</label>
-                  <input
-                    id="vibe-pl-{p.id}-mb"
-                    class="vibe-input vibe-input--inspector-num"
-                    type="number"
-                    min="0"
-                    max="200"
-                    value={p.layout.marginBottomPx}
-                    oninput={(e) =>
-                      updatePlacementLayout(p.id, {
-                        marginBottomPx: Number(e.currentTarget.value) || 0,
-                      })}
-                  />
-                </div>
-
-                <p class="vibe-inspector-section">Style</p>
-                <p class="vibe-inspector-label-sm" style="margin: 0 0 0.25rem">Padding (px)</p>
-                <div class="vibe-inspector-grid vibe-inspector-grid--pads">
-                  <input
-                    class="vibe-input vibe-input--inspector-num"
-                    type="number"
-                    min="0"
-                    max="200"
-                    title="Top"
-                    aria-label="Padding top"
-                    value={p.layout.paddingTopPx}
-                    oninput={(e) =>
-                      updatePlacementLayout(p.id, {
-                        paddingTopPx: Number(e.currentTarget.value) || 0,
-                      })}
-                  />
-                  <input
-                    class="vibe-input vibe-input--inspector-num"
-                    type="number"
-                    min="0"
-                    max="200"
-                    title="Right"
-                    aria-label="Padding right"
-                    value={p.layout.paddingRightPx}
-                    oninput={(e) =>
-                      updatePlacementLayout(p.id, {
-                        paddingRightPx: Number(e.currentTarget.value) || 0,
-                      })}
-                  />
-                  <input
-                    class="vibe-input vibe-input--inspector-num"
-                    type="number"
-                    min="0"
-                    max="200"
-                    title="Bottom"
-                    aria-label="Padding bottom"
-                    value={p.layout.paddingBottomPx}
-                    oninput={(e) =>
-                      updatePlacementLayout(p.id, {
-                        paddingBottomPx: Number(e.currentTarget.value) || 0,
-                      })}
-                  />
-                  <input
-                    class="vibe-input vibe-input--inspector-num"
-                    type="number"
-                    min="0"
-                    max="200"
-                    title="Left"
-                    aria-label="Padding left"
-                    value={p.layout.paddingLeftPx}
-                    oninput={(e) =>
-                      updatePlacementLayout(p.id, {
-                        paddingLeftPx: Number(e.currentTarget.value) || 0,
-                      })}
-                  />
-                </div>
-                <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-bg">Background</label>
-                <input
-                  id="vibe-pl-{p.id}-bg"
-                  class="vibe-input vibe-input--mono"
-                  type="text"
-                  value={p.layout.background}
-                  onchange={(e) =>
-                    updatePlacementLayout(p.id, {
-                      background: sanitizeVibePlacementBackground(e.currentTarget.value),
-                    })}
-                  autocomplete="off"
-                  placeholder="transparent, #fff, rgba(...)"
-                />
-                <div class="vibe-inspector-grid" style="margin-top: 0.35rem">
-                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-br">Radius</label>
-                  <input
-                    id="vibe-pl-{p.id}-br"
-                    class="vibe-input vibe-input--inspector-num"
-                    type="number"
-                    min="0"
-                    max="64"
-                    value={p.layout.borderRadiusPx}
-                    oninput={(e) =>
-                      updatePlacementLayout(p.id, {
-                        borderRadiusPx: Number(e.currentTarget.value) || 0,
-                      })}
-                  />
-                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-sh">Shadow</label>
-                  <select
-                    id="vibe-pl-{p.id}-sh"
-                    class="vibe-select"
-                    value={p.layout.shadow}
-                    onchange={(e) =>
-                      updatePlacementLayout(p.id, {
-                        shadow: e.currentTarget.value as VibePlacementShadow,
-                      })}
-                  >
-                    <option value="none">None</option>
-                    <option value="sm">Small</option>
-                    <option value="md">Medium</option>
-                  </select>
-                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-bd">Border</label>
-                  <select
-                    id="vibe-pl-{p.id}-bd"
-                    class="vibe-select"
-                    value={p.layout.border}
-                    onchange={(e) =>
-                      updatePlacementLayout(p.id, {
-                        border: e.currentTarget.value as VibePlacementBorder,
-                      })}
-                  >
-                    <option value="none">None</option>
-                    <option value="subtle">Subtle</option>
-                    <option value="strong">Strong</option>
-                  </select>
-                </div>
-
-                {#if placementTokens.length > 0}
-                  <p class="vibe-inspector-section">Content</p>
-                  <div class="vibe-page-tokens">
-                    {#each placementTokens as token (token)}
-                      <div class="vibe-token-row vibe-token-row--inspector">
-                        <label class="vibe-label vibe-token-label" for="vibe-pl-{p.id}-{token}"
-                          >{`{${token}}`}</label
-                        >
-                        <input
-                          id="vibe-pl-{p.id}-{token}"
-                          class="vibe-input"
-                          type="text"
-                          value={placementFieldValue(p, token)}
-                          oninput={(e) =>
-                            setPlacementInputValue(p.id, token, e.currentTarget.value)}
-                          autocomplete="off"
-                        />
-                      </div>
-                    {/each}
+                {#if !placementCollapsed}
+                  <div class="vibe-inspector-presets">
+                    <span class="vibe-inspector-section" style="margin-top:0">Presets</span>
+                    <div class="vibe-inspector-preset-btns">
+                      <button
+                        type="button"
+                        class="vibe-btn vibe-btn--small"
+                        title="No wrapper chrome—component HTML defines the surface"
+                        onclick={() => setPlacementLayoutPreset(p.id, 'default')}
+                      >
+                        Plain
+                      </button>
+                      <button
+                        type="button"
+                        class="vibe-btn vibe-btn--small"
+                        onclick={() => setPlacementLayoutPreset(p.id, 'hero')}
+                      >
+                        Hero
+                      </button>
+                      <button
+                        type="button"
+                        class="vibe-btn vibe-btn--small"
+                        onclick={() => setPlacementLayoutPreset(p.id, 'card')}
+                      >
+                        Card
+                      </button>
+                      <button
+                        type="button"
+                        class="vibe-btn vibe-btn--small"
+                        onclick={() => setPlacementLayoutPreset(p.id, 'section')}
+                      >
+                        Section
+                      </button>
+                      <button
+                        type="button"
+                        class="vibe-btn vibe-btn--small"
+                        onclick={() => setPlacementLayoutPreset(p.id, 'ctaRow')}
+                      >
+                        CTA row
+                      </button>
+                    </div>
                   </div>
+                  <p class="vibe-inspector-section">Layout</p>
+                  <div class="vibe-inspector-grid">
+                    <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-wm">Width</label>
+                    <select
+                      id="vibe-pl-{p.id}-wm"
+                      class="vibe-select"
+                      value={p.layout.widthMode}
+                      onchange={(e) =>
+                        updatePlacementLayout(p.id, {
+                          widthMode: e.currentTarget.value as VibePlacementWidthMode,
+                        })}
+                    >
+                      <option value="fill">Fill (100%)</option>
+                      <option value="fixed">Fixed (px)</option>
+                      <option value="content">Hug content</option>
+                    </select>
+
+                    <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-al">Align</label>
+                    <select
+                      id="vibe-pl-{p.id}-al"
+                      class="vibe-select"
+                      value={p.layout.align}
+                      onchange={(e) =>
+                        updatePlacementLayout(p.id, {
+                          align: e.currentTarget.value as VibePlacementAlign,
+                        })}
+                    >
+                      <option value="stretch">Stretch</option>
+                      <option value="start">Start</option>
+                      <option value="center">Center</option>
+                      <option value="end">End</option>
+                    </select>
+                  </div>
+                  {#if p.layout.widthMode === 'fill'}
+                    <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-mw"
+                      >Max width (px, 0 = none)</label
+                    >
+                    <input
+                      id="vibe-pl-{p.id}-mw"
+                      class="vibe-input vibe-input--inspector-num"
+                      type="number"
+                      min="0"
+                      max="2400"
+                      value={p.layout.maxWidthPx}
+                      oninput={(e) =>
+                        updatePlacementLayout(p.id, {
+                          maxWidthPx: Number(e.currentTarget.value) || 0,
+                        })}
+                    />
+                  {:else if p.layout.widthMode === 'fixed'}
+                    <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-wp">Width (px)</label>
+                    <input
+                      id="vibe-pl-{p.id}-wp"
+                      class="vibe-input vibe-input--inspector-num"
+                      type="number"
+                      min="80"
+                      max="2000"
+                      value={p.layout.widthPx}
+                      oninput={(e) =>
+                        updatePlacementLayout(p.id, {
+                          widthPx: Number(e.currentTarget.value) || 80,
+                        })}
+                    />
+                  {/if}
+                  <div class="vibe-inspector-grid" style="margin-top: 0.35rem">
+                    <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-mt">Margin T</label>
+                    <input
+                      id="vibe-pl-{p.id}-mt"
+                      class="vibe-input vibe-input--inspector-num"
+                      type="number"
+                      min="0"
+                      max="200"
+                      value={p.layout.marginTopPx}
+                      oninput={(e) =>
+                        updatePlacementLayout(p.id, {
+                          marginTopPx: Number(e.currentTarget.value) || 0,
+                        })}
+                    />
+                    <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-mb">Margin B</label>
+                    <input
+                      id="vibe-pl-{p.id}-mb"
+                      class="vibe-input vibe-input--inspector-num"
+                      type="number"
+                      min="0"
+                      max="200"
+                      value={p.layout.marginBottomPx}
+                      oninput={(e) =>
+                        updatePlacementLayout(p.id, {
+                          marginBottomPx: Number(e.currentTarget.value) || 0,
+                        })}
+                    />
+                  </div>
+
+                  <p class="vibe-inspector-section">Style</p>
+                  <p class="vibe-inspector-label-sm" style="margin: 0 0 0.25rem">Padding (px)</p>
+                  <div class="vibe-inspector-grid vibe-inspector-grid--pads">
+                    <input
+                      class="vibe-input vibe-input--inspector-num"
+                      type="number"
+                      min="0"
+                      max="200"
+                      title="Top"
+                      aria-label="Padding top"
+                      value={p.layout.paddingTopPx}
+                      oninput={(e) =>
+                        updatePlacementLayout(p.id, {
+                          paddingTopPx: Number(e.currentTarget.value) || 0,
+                        })}
+                    />
+                    <input
+                      class="vibe-input vibe-input--inspector-num"
+                      type="number"
+                      min="0"
+                      max="200"
+                      title="Right"
+                      aria-label="Padding right"
+                      value={p.layout.paddingRightPx}
+                      oninput={(e) =>
+                        updatePlacementLayout(p.id, {
+                          paddingRightPx: Number(e.currentTarget.value) || 0,
+                        })}
+                    />
+                    <input
+                      class="vibe-input vibe-input--inspector-num"
+                      type="number"
+                      min="0"
+                      max="200"
+                      title="Bottom"
+                      aria-label="Padding bottom"
+                      value={p.layout.paddingBottomPx}
+                      oninput={(e) =>
+                        updatePlacementLayout(p.id, {
+                          paddingBottomPx: Number(e.currentTarget.value) || 0,
+                        })}
+                    />
+                    <input
+                      class="vibe-input vibe-input--inspector-num"
+                      type="number"
+                      min="0"
+                      max="200"
+                      title="Left"
+                      aria-label="Padding left"
+                      value={p.layout.paddingLeftPx}
+                      oninput={(e) =>
+                        updatePlacementLayout(p.id, {
+                          paddingLeftPx: Number(e.currentTarget.value) || 0,
+                        })}
+                    />
+                  </div>
+                  <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-bg">Background</label>
+                  <input
+                    id="vibe-pl-{p.id}-bg"
+                    class="vibe-input vibe-input--mono"
+                    type="text"
+                    value={p.layout.background}
+                    onchange={(e) =>
+                      updatePlacementLayout(p.id, {
+                        background: sanitizeVibePlacementBackground(e.currentTarget.value),
+                      })}
+                    autocomplete="off"
+                    placeholder="transparent, #fff, rgba(...)"
+                  />
+                  <div class="vibe-inspector-grid" style="margin-top: 0.35rem">
+                    <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-br">Radius</label>
+                    <input
+                      id="vibe-pl-{p.id}-br"
+                      class="vibe-input vibe-input--inspector-num"
+                      type="number"
+                      min="0"
+                      max="64"
+                      value={p.layout.borderRadiusPx}
+                      oninput={(e) =>
+                        updatePlacementLayout(p.id, {
+                          borderRadiusPx: Number(e.currentTarget.value) || 0,
+                        })}
+                    />
+                    <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-sh">Shadow</label>
+                    <select
+                      id="vibe-pl-{p.id}-sh"
+                      class="vibe-select"
+                      value={p.layout.shadow}
+                      onchange={(e) =>
+                        updatePlacementLayout(p.id, {
+                          shadow: e.currentTarget.value as VibePlacementShadow,
+                        })}
+                    >
+                      <option value="none">None</option>
+                      <option value="sm">Small</option>
+                      <option value="md">Medium</option>
+                    </select>
+                    <label class="vibe-label vibe-inspector-label-sm" for="vibe-pl-{p.id}-bd">Border</label>
+                    <select
+                      id="vibe-pl-{p.id}-bd"
+                      class="vibe-select"
+                      value={p.layout.border}
+                      onchange={(e) =>
+                        updatePlacementLayout(p.id, {
+                          border: e.currentTarget.value as VibePlacementBorder,
+                        })}
+                    >
+                      <option value="none">None</option>
+                      <option value="subtle">Subtle</option>
+                      <option value="strong">Strong</option>
+                    </select>
+                  </div>
+
+                  {#if placementTokens.length > 0}
+                    <p class="vibe-inspector-section">Content</p>
+                    <div class="vibe-page-tokens">
+                      {#each placementTokens as token (token)}
+                        <div class="vibe-token-row vibe-token-row--inspector">
+                          <label class="vibe-label vibe-token-label" for="vibe-pl-{p.id}-{token}"
+                            >{`{${token}}`}</label
+                          >
+                          <input
+                            id="vibe-pl-{p.id}-{token}"
+                            class="vibe-input"
+                            type="text"
+                            value={placementFieldValue(p, token)}
+                            oninput={(e) =>
+                              setPlacementInputValue(p.id, token, e.currentTarget.value)}
+                            autocomplete="off"
+                          />
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
                 {/if}
                 <div class="vibe-list-actions">
                   <button
@@ -1465,6 +1494,35 @@
     justify-content: space-between;
     gap: 0.5rem;
     min-width: 0;
+  }
+
+  .vibe-page-item-main-right {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-shrink: 0;
+  }
+
+  .vibe-page-item--collapsed {
+    gap: 0.35rem;
+  }
+
+  .vibe-collapse-toggle {
+    width: 1.35rem;
+    height: 1.35rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0;
+    font: inherit;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--muted);
+    background: var(--surface);
+  }
+
+  .vibe-collapse-toggle:hover {
+    color: var(--text);
+    border-color: rgba(196, 181, 253, 0.45);
   }
 
   .vibe-page-tokens {

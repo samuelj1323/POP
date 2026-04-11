@@ -4,34 +4,41 @@ This repository is **Pop**, a browser-based **vibe designing** platform (Svelte 
 
 ## Quick commands
 
-| Command | Purpose |
-|--------|---------|
-| `npm install` | Install dependencies |
-| `npm run dev` | Dev server (Vite) |
-| `npm run build` | Production build |
+
+| Command         | Purpose                     |
+| --------------- | --------------------------- |
+| `npm install`   | Install dependencies        |
+| `npm run dev`   | Dev server (Vite)           |
+| `npm run build` | Production build            |
 | `npm run check` | `svelte-check` + TypeScript |
+
 
 ## Entry and layout
 
-| File | Role |
-|------|------|
-| `index.html` | Mounts `#app`, loads `src/main.ts` |
-| `src/main.ts` | `mount(App, { target })` — Svelte entry |
-| `src/App.svelte` | **Main shell**: Library vs Page builder modes, iframe preview, Design assistant |
-| `src/style.css` | Global tokens, reset, `#app` layout |
 
-**Rule of thumb:** Product UI lives in **`App.svelte`**. Shared types, persistence, preview HTML, LLM helpers, and patch application live under **`src/studio/`**.
+| File             | Role                                                                            |
+| ---------------- | ------------------------------------------------------------------------------- |
+| `index.html`     | Mounts `#app`, loads `src/main.ts`                                              |
+| `src/main.ts`    | `mount(App, { target })` — Svelte entry                                         |
+| `src/App.svelte` | **Main shell**: Library vs Page builder modes, iframe preview, Design assistant |
+| `src/style.css`  | Global tokens, reset, `#app` layout                                             |
+
+
+**Rule of thumb:** Product UI lives in `**App.svelte`**. Shared types, persistence, preview HTML, LLM helpers, and patch application live under `**src/studio/**`.
 
 ## Domain model (`src/studio/`)
 
-| Module | Contents |
-|--------|----------|
-| `vibe-document.ts` | `VibeComponent`, `VibePagePlacement`, `VibeDocument` (**v: 2**), `normalizeVibeDocument()`, `documentToVibeContextJson()` |
-| `vibe-persistence.ts` | `VIBE_STORAGE_KEY`, `loadVibeDocument`, `saveVibeDocument` (loads v1 JSON and upgrades to v2 with empty `pagePlacements`) |
-| `vibe-preview-html.ts` | `buildVibePreviewSrcdoc(pagePlacements, components)` — iframe `srcdoc` from **page only** |
-| `vibe-patch.ts` | `VibePatchOp` (library + page ops), `applyVibePatchOps()` — `removeComponent` also drops placements for that `componentId` |
-| `llm-design.ts` | Gemini/OpenAI-compatible fetch, `buildVibeDesignLlmSystemPrompt()`, `parseVibePatchOpsFromLlmText()`, AI settings in `localStorage` |
-| `id.ts` | `newId()` (UUID) |
+
+| Module                     | Contents                                                                                                                            |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `vibe-document.ts`         | `VibeComponent`, `VibePagePlacement`, `VibeDocument` (**v: 2**), `normalizeVibeDocument()`, `documentToVibeContextJson()`           |
+| `vibe-persistence.ts`      | `VIBE_STORAGE_KEY`, `loadVibeDocument`, `saveVibeDocument` (loads v1 JSON and upgrades to v2 with empty `pagePlacements`)           |
+| `vibe-preview-html.ts`     | `buildVibePreviewSrcdoc(pagePlacements, components)` — iframe `srcdoc` from **page only**                                           |
+| `vibe-placement-layout.ts` | Placement `layout` types, presets, `normalizeVibePlacementLayout()`, style mapping for iframe slots                                 |
+| `vibe-patch.ts`            | `VibePatchOp` (library + page ops), `applyVibePatchOps()` — `removeComponent` also drops placements for that `componentId`          |
+| `llm-design.ts`            | Gemini/OpenAI-compatible fetch, `buildVibeDesignLlmSystemPrompt()`, `parseVibePatchOpsFromLlmText()`, AI settings in `localStorage` |
+| `id.ts`                    | `newId()` (UUID)                                                                                                                    |
+
 
 **Document shape (`v: 2`):** `components[]` = library definitions; `pagePlacements[]` = `{ id, componentId, inputValues, layout }` in top-to-bottom preview order. Each placement `layout` controls iframe slot chrome (width, spacing, surface); see `src/studio/vibe-placement-layout.ts`.
 
@@ -46,11 +53,15 @@ Legacy **SVG studio** modules have been removed.
 
 The **Design assistant** connects an LLM to the live document:
 
-1. **Send context**: JSON from `documentToVibeContextJson(doc)` (library + `pagePlacements`) plus the user request.
+1. **Send context**: JSON from `documentToVibeContextJson(doc)` (library + `pagePlacements`, each with `layout`) plus the user request.
 2. **Model output**: JSON only — array of patch ops or `{"ops":[...]}` (see `buildVibeDesignLlmSystemPrompt()`).
 3. **Apply**: `parseVibePatchOpsFromLlmText` → `applyVibePatchOps` → updates `doc`; persistence runs via `$effect` after hydration.
 
-**API**: Gemini uses `buildGeminiGenerateContentUrl(modelId)` and header **`X-goog-api-key`**. **Configuration**: `localStorage` keys `pop-ai-key`, `pop-ai-model`, optional `pop-ai-endpoint`, or Vite **`VITE_POP_AI_KEY`**, **`VITE_POP_AI_MODEL`** (see `.env.example`). Direct browser calls may be blocked by **CORS**; use a same-origin proxy if needed.
+**Page layout for models:** The system prompt tells the model to use **placement `layout`** (width, margins, max width, align, surface) for hierarchy—not only stacked components. `**addPagePlacement**` accepts optional `**layout**` (normalized with defaults). `**updatePagePlacement**` accepts partial `**patch.layout**`. For several adds in one reply, use `**placementId**` (UUID) on each add so `layout` can be set in the same turn.
+
+**Docs & Cursor skill:** `[docs/llm-pop-design-assistant.md](docs/llm-pop-design-assistant.md)` — patch/layout reference. `[.cursor/skills/pop-design-assistant/SKILL.md](.cursor/skills/pop-design-assistant/SKILL.md)` — agent skill for this workflow.
+
+**API**: Gemini uses `buildGeminiGenerateContentUrl(modelId)` and header `**X-goog-api-key`**. **Configuration**: `localStorage` keys `pop-ai-key`, `pop-ai-model`, optional `pop-ai-endpoint`, or Vite `**VITE_POP_AI_KEY`**, `**VITE_POP_AI_MODEL**` (see `.env.example`). Direct browser calls may be blocked by **CORS**; use a same-origin proxy if needed.
 
 ## Conventions for changes
 
@@ -64,7 +75,7 @@ The **Design assistant** connects an LLM to the live document:
 You are working in the POP repo: a Svelte 5 + Vite + TypeScript vibe designing platform.
 
 Constraints:
-- Read AGENTS.md at the repo root for architecture.
+- Read AGENTS.md at the repo root for architecture; for LLM/patch/layout behavior read docs/llm-pop-design-assistant.md and keep buildVibeDesignLlmSystemPrompt() in sync.
 - Prefer editing src/studio/ for types and pure logic; App.svelte for UI.
 - After changing types, run: npm run check
 
@@ -79,3 +90,4 @@ Deliver:
 ## What not to assume
 
 - There is no separate `components/` UI library folder yet; chrome is in `App.svelte`.
+

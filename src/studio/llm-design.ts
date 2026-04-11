@@ -76,7 +76,7 @@ export function buildVibeDesignLlmSystemPrompt(): string {
 
 There are two layers:
 1) **Library** — reusable components: each has an id, display name, HTML fragment (inline CSS or <style> blocks), and optional **inputValues** as default text for brace-wrapped token placeholders in the HTML (token names: letters, digits, underscore, hyphen).
-2) **Page** — ordered list of **placements**. Each placement has its own id, references a library component via componentId, optional **inputValues** that override the component defaults for that instance only, and a **layout** object (widthMode fill|fixed|content, widthPx, maxWidthPx, margin/padding px, align start|center|end|stretch, background CSS color, borderRadiusPx, shadow none|sm|md, border none|subtle|strong). The iframe preview renders **only** these placements, in order—not the whole library.
+2) **Page** — ordered list of **placements**. Each placement has its own id, references a library component via componentId, optional **inputValues** (per-instance overrides), and **layout** (see below). The iframe preview renders **only** these placements, top-to-bottom—not the whole library.
 
 You output ONLY valid JSON: either a JSON array of patch operations, or a single object {"ops": [...]}.
 
@@ -88,10 +88,45 @@ Each operation is an object with an "op" field. Allowed ops:
 - {"op":"removeComponent","id":string} — removes from library and removes all page placements that reference that componentId.
 
 **Page (preview)**
-- {"op":"addPagePlacement","componentId":string,"placementId"?:string,"inputValues"?:object} — append one instance. Optional inputValues: per-instance overrides (merged over that component's defaults). Optional placementId = new UUID if omitted.
-- {"op":"updatePagePlacement","id":string,"patch":{"inputValues"?:object,"layout"?:object}} — merge into one placement by id. inputValues: keys not in that component's html are dropped. layout: partial layout fields merged (at least one of inputValues or layout must be present).
+- {"op":"addPagePlacement","componentId":string,"placementId"?:string,"inputValues"?:object,"layout"?:object} — append one instance. Optional placementId (UUID) lets you add then reference the same id in later ops in one response; if omitted, id is generated and you cannot patch layout in the same turn unless you supplied placementId. Optional layout: full or partial layout object (same fields as in context); merged with POP defaults. Prefer setting layout here when adding so the page is not a boring vertical stack of identical blocks.
+- {"op":"updatePagePlacement","id":string,"patch":{"inputValues"?:object,"layout"?:object}} — merge into one placement by id. layout: partial fields merged onto current layout. At least one of inputValues or layout must be present.
 - {"op":"removePagePlacement","id":string} — remove one placement by its id (from pagePlacements in context).
 - {"op":"movePagePlacement","id":string,"toIndex":number} — move the placement to a zero-based index in the current page list after removal (0 = top; use length to append).
+
+**Placement layout (structure and intent)**
+
+Each placement wraps the component HTML in an iframe slot. Default layout is a **pass-through** (transparent background, no border/shadow/padding) so the **component's own HTML** defines surface and typography. You should still vary **layout** across the page to create rhythm and hierarchy—do not rely on stacking identical full-width blocks only.
+
+Layout fields (numbers are pixels unless noted):
+- **widthMode**: "fill" | "fixed" | "content" — fill = 100% row width; fixed = widthPx; content = hug content (good for CTAs, badges, narrow cards).
+- **widthPx** — used when widthMode is "fixed" (e.g. 480–720 for readable columns).
+- **maxWidthPx** — when widthMode is "fill", caps width (e.g. 640–960 for prose); 0 means no cap.
+- **align**: "stretch" | "start" | "center" | "end" — cross-axis in the vertical page (horizontal alignment of the block).
+- **marginTopPx**, **marginBottomPx** — vertical rhythm between sections (e.g. 8–32 between blocks; more after heroes).
+- **paddingTopPx**, **paddingRightPx**, **paddingBottomPx**, **paddingLeftPx** — outer "frame" around the fragment when you want a card or inset without bloating the component HTML.
+- **background** — CSS color only: transparent, #rgb/#rrggbb, or rgba(...). Use for bands and cards.
+- **borderRadiusPx** — corner rounding on the slot.
+- **shadow**: "none" | "sm" | "md"
+- **border**: "none" | "subtle" | "strong"
+
+**Layout composition (do this, not only stacked HTML)**
+
+- Treat the **page as a sequence of sections** with different roles: hero (wide, centered, generous padding/margins), content (maxWidth for reading), supporting rows (content width + center), CTAs (content width + center, pill radius).
+- Use **widthMode + align + maxWidthPx** so blocks are not all full-bleed rectangles; center important content with align "center" and widthMode "content" or fill with maxWidthPx.
+- Use **margins** for spacing between placements; avoid duplicating huge margin-top only inside every component's HTML when layout can own rhythm.
+- Put **card chrome** (padding, white background, border, shadow) on **layout** when the component is structural (e.g. simple inner markup); keep **layout minimal** when the component already brings a complete styled surface.
+- When adding multiple placements in one response, supply **placementId** UUIDs and include **layout** on each addPagePlacement so each block has intentional hierarchy without a second round trip.
+
+**Minimal layout examples (patterns, not mandatory values)**
+
+Opening hero band:
+{"widthMode":"fill","maxWidthPx":720,"align":"center","marginTopPx":8,"marginBottomPx":28,"paddingTopPx":32,"paddingBottomPx":32,"paddingLeftPx":28,"paddingRightPx":28,"background":"#ffffff","borderRadiusPx":16,"shadow":"md","border":"none"}
+
+Inset content section:
+{"widthMode":"fill","maxWidthPx":960,"align":"stretch","marginBottomPx":20,"paddingTopPx":24,"paddingBottomPx":24,"paddingLeftPx":24,"paddingRightPx":24,"background":"rgba(255,255,255,0.72)","borderRadiusPx":12,"shadow":"none","border":"none"}
+
+Centered CTA / button row:
+{"widthMode":"content","align":"center","marginTopPx":4,"marginBottomPx":16,"paddingTopPx":10,"paddingBottomPx":10,"paddingLeftPx":16,"paddingRightPx":16,"background":"#ffffff","borderRadiusPx":999,"shadow":"sm","border":"subtle"}
 
 Rules:
 - Use exact "id" / "componentId" / placement "id" values from the user context JSON.
@@ -152,6 +187,9 @@ function isVibePatchOp(x: unknown): x is VibePatchOp {
         for (const v of Object.values(o.inputValues as Record<string, unknown>)) {
           if (typeof v !== 'string') return false
         }
+      }
+      if (o.layout !== undefined) {
+        if (!o.layout || typeof o.layout !== 'object' || Array.isArray(o.layout)) return false
       }
       return true
     }
