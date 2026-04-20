@@ -3,6 +3,7 @@ import {
   MAX_VIEW_SCALE,
   MIN_ITEM_SIZE,
   MIN_VIEW_SCALE,
+  GRID_PATTERN_WORLD,
   SNAP_PX,
   VIEW_H,
   VIEW_W,
@@ -19,6 +20,16 @@ import {
 import type { ResizeHandleId } from './studio/layout-geometry.ts'
 import { clamp } from './studio/math.ts'
 import {
+  computeWorldBoundsWithContent,
+  createDefaultFrame,
+  documentToV3Json,
+  loadDocumentV3,
+  migrateV2ToV3,
+  type DesignTokens,
+  type PopDocumentV3,
+  type PopFrame,
+} from './studio/document.ts'
+import {
   defsToRecord,
   isValidCanvasItem,
   migrateV1ToScene,
@@ -27,11 +38,19 @@ import {
   recordToNodes,
   STORAGE_KEY_V1,
   STORAGE_KEY_V2,
+  STORAGE_KEY_V3,
 } from './studio/persistence.ts'
-
-const TOOLBAR_PIN_STORAGE_KEY = 'pop-toolbar-pinned'
 import type { PersistedStateV1, PersistedStateV2 } from './studio/persistence.ts'
-import type { ComponentDefinition, DefNode, SceneGroup, SceneNode, Tool } from './studio/scene-types.ts'
+import type {
+  ComponentDefinition,
+  DefNode,
+  GroupLayout,
+  SceneGroup,
+  SceneLeaf,
+  SceneNode,
+  Tool,
+} from './studio/scene-types.ts'
+import type { SnapBounds } from './studio/snap.ts'
 import { collectSnapTargetsX, collectSnapTargetsY, snapAxis } from './studio/snap.ts'
 import {
   buildSvgFragmentLeafLocal,
@@ -41,30 +60,143 @@ import {
   serializeSceneSubtreeSvg,
   serializeSvgFromRoots,
 } from './studio/svg-export.ts'
+import {
+  resolvedFill,
+  resolvedStroke,
+  tokensToCssRootBlock,
+  tokensToJson,
+} from './studio/design-tokens.ts'
+import { DESIGN_SYSTEM_PRESETS } from './studio/design-system-presets.ts'
+import { importDesignTokensFromJson, mergeDesignTokens } from './studio/import-tokens.ts'
+import { downloadHtml, exportFrameToHtml } from './studio/html-export.ts'
+import {
+  buildDesignLlmSystemPrompt,
+  buildGeminiGenerateContentUrl,
+  defaultGeminiModelId,
+  fetchDesignLlmReply,
+  GOOGLE_AI_STUDIO_GEMINI_MODELS,
+  parsePatchOpsFromLlmText,
+  readAiSettingsFromStorage,
+  writeAiKey,
+  writeAiModel,
+} from './studio/llm-design.ts'
+import { applyPatch } from './studio/patch.ts'
 
+/** POP editor UI (imperative DOM). Domain model: `src/studio/`. Repo context: `AGENTS.md`. */
+
+const POP_CLIPBOARD_VERSION = 1 as const
+const PASTE_OFFSET_WORLD = 10
+const STORAGE_KEY_LEFT_INSPECTOR_PINNED = 'pop-left-inspector-pinned'
+
+function readLeftInspectorPinned(): boolean {
+  try {
+    return localStorage.getItem(STORAGE_KEY_LEFT_INSPECTOR_PINNED) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeLeftInspectorPinned(v: boolean): void {
+  try {
+    localStorage.setItem(STORAGE_KEY_LEFT_INSPECTOR_PINNED, v ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+}
+
+type PopClipboardPayload = {
+  popClipboard: typeof POP_CLIPBOARD_VERSION
+  roots: string[]
+  nodes: Record<string, SceneNode>
+  layerNames?: Record<string, string>
+}
+
+function parsePopClipboard(raw: string): PopClipboardPayload | null {
+  try {
+    const o = JSON.parse(raw) as unknown
+    if (!o || typeof o !== 'object') return null
+    const p = o as Record<string, unknown>
+    if (p.popClipboard !== POP_CLIPBOARD_VERSION) return null
+    if (!Array.isArray(p.roots) || !p.roots.every((x): x is string => typeof x === 'string')) return null
+    if (!p.nodes || typeof p.nodes !== 'object') return null
+    return p as PopClipboardPayload
+  } catch {
+    return null
+  }
+}
+
+/** Attach the full editor UI and behavior to `root`. */
 export function mount(root: HTMLElement): void {
-  let rootIds: string[] = []
+  let frames: PopFrame[] = [createDefaultFrame()]
+  let activeFrameId = frames[0]!.id
+  let docName = 'Untitled'
+  let tokens: DesignTokens = {}
+  /** Stylesheet URLs merged into exported HTML `<head>`. */
+  let htmlExportStylesheets: string[] = []
+  /** When editing a component, scene roots are not frame roots. */
+  let componentEditRoots: string[] | null = null
   let nodes = new Map<string, SceneNode>()
   let definitions = new Map<string, ComponentDefinition>()
   /** When set, canvas shows definition tree for editing the main component. */
   let editingComponentId: string | null = null
   let mainNodesBackup: Map<string, SceneNode> | null = null
   let mainRootIdsBackup: string[] | null = null
+  let worldW = VIEW_W
+  let worldH = VIEW_H
+
+  function getActiveFrame(): PopFrame {
+    const f = frames.find((x) => x.id === activeFrameId)
+    if (f) return f
+    return frames[0]!
+  }
+
+  function roots(): string[] {
+    if (componentEditRoots !== null) return componentEditRoots
+    return getActiveFrame().rootIds
+  }
+
+  function snapBoundsForFrame(): SnapBounds {
+    const f = getActiveFrame()
+    return { x: f.x, y: f.y, width: f.width, height: f.height }
+  }
+
+  function recomputeWorldSize(): void {
+    const b = computeWorldBoundsWithContent(frames, nodes, definitions, VIEW_W, VIEW_H)
+    let maxX = b.worldW
+    let maxY = b.worldH
+    if (componentEditRoots) {
+      for (const rid of componentEditRoots) {
+        const ids = collectSubtreeIds(nodes, rid)
+        const u = unionBoundsWorld(ids, nodes, definitions)
+        if (u) {
+          maxX = Math.max(maxX, u.right)
+          maxY = Math.max(maxY, u.bottom)
+        }
+      }
+    }
+    worldW = maxX
+    worldH = maxY
+  }
   /** Custom layer names by item id; when missing, UI falls back to `itemLabel`. */
   let layerNames: Record<string, string> = {}
   let selected = new Set<string>()
   /** Left sidebar: layer tree vs parent-chain helper (Figma-style hierarchy). */
   let layersAsideTab: 'layers' | 'parent' = 'layers'
   let tool: Tool = 'select'
-  let defaultFill = '#3b82f6'
-  let defaultStroke = '#1e3a5f'
+  let defaultFill = '#a78bfa'
+  let defaultStroke = '#4c1d95'
   let defaultStrokeWidth = 2
   let symmetryGuidesOn = true
   let propsPanelFocused = false
+  let stylePanelFocused = false
+  let defaultOpacity = 1
+  let defaultRx = 0
   let lastSnapHint: string | null = null
   let viewTx = 0
   let viewTy = 0
   let viewScale = 1
+  let leftInspectorPeek = false
+  let leftInspectorPinned = readLeftInspectorPinned()
 
   const dragState: {
     active: boolean
@@ -98,220 +230,365 @@ export function mount(root: HTMLElement): void {
 
   root.innerHTML = `
     <div class="pop-app">
-      <header class="pop-header">
-        <h1 class="pop-title">Pop</h1>
-        <p class="pop-sub">Draw on the canvas, add images, then export SVG. Raster images become <code>&lt;image&gt;</code> in the SVG (embedded), not auto-traced vectors.</p>
+      <header class="pop-chrome-min" role="banner">
+        <div class="pop-chrome-min-inner">
+          <h1 class="pop-title">POP</h1>
+          <p class="pop-sub" title="Vibe designing for web and mobile in the browser. Draw on the canvas, add images, then export SVG or HTML. Raster images become &lt;image&gt; in the SVG (embedded), not auto-traced."><span class="pop-sub-lead">Vibe designing for web &amp; mobile.</span> Sketch UI and graphics on the canvas—shapes, text &amp; images—then export SVG or HTML.</p>
+        </div>
       </header>
-      <div class="pop-toolbar-wrap" id="pop-toolbar-wrap">
-        <div class="pop-toolbar-bar">
-          <button type="button" class="pop-btn pop-toolbar-pin" id="pop-toolbar-pin" aria-pressed="false" aria-expanded="false" aria-controls="pop-toolbar-expanded">
-            <span class="pop-toolbar-pin-glyph" aria-hidden="true">📌</span>
-            <span class="pop-toolbar-pin-label">Pin toolbar</span>
-          </button>
-          <div class="pop-toolbar-expanded" id="pop-toolbar-expanded" role="toolbar" aria-label="Studio tools" hidden>
-            <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-tools-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-tools-panel">Tools</button>
-              <div class="pop-tb-dd-panel" id="pop-tb-tools-panel" role="region" aria-labelledby="pop-tb-tools-btn" hidden>
-                <p class="pop-tb-dd-desc" id="pop-tb-tools-desc">Pick what you draw on the canvas next.</p>
-                <div class="pop-tb-grid pop-tb-grid-tools" role="group" aria-describedby="pop-tb-tools-desc">
-                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="select" aria-pressed="true">
-                    <span class="pop-tb-grid-title">Select</span>
-                    <span class="pop-tb-grid-sub">Move and resize</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="rect" aria-pressed="false">
-                    <span class="pop-tb-grid-title">Rectangle</span>
-                    <span class="pop-tb-grid-sub">Filled box</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="ellipse" aria-pressed="false">
-                    <span class="pop-tb-grid-title">Ellipse</span>
-                    <span class="pop-tb-grid-sub">Circle or oval</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="text" aria-pressed="false">
-                    <span class="pop-tb-grid-title">Text</span>
-                    <span class="pop-tb-grid-sub">Place a label</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tool pop-tb-grid-btn" data-tool="image" aria-pressed="false">
-                    <span class="pop-tb-grid-title">Image</span>
-                    <span class="pop-tb-grid-sub">Embed raster</span>
-                  </button>
-                </div>
+      <div class="pop-main">
+        <div class="pop-left-shell" id="pop-left-shell">
+          <nav class="pop-left-rail" aria-label="Tools and document">
+            <div class="pop-left-rail-tools" role="toolbar" aria-label="Drawing tools">
+              <button type="button" class="pop-btn pop-tool pop-left-rail-tool" data-tool="select" aria-pressed="true" title="Move and resize">Sel</button>
+              <button type="button" class="pop-btn pop-tool pop-left-rail-tool" data-tool="rect" aria-pressed="false" title="Draw a rectangle">Rect</button>
+              <button type="button" class="pop-btn pop-tool pop-left-rail-tool" data-tool="ellipse" aria-pressed="false" title="Draw an ellipse">Ellipse</button>
+              <button type="button" class="pop-btn pop-tool pop-left-rail-tool" data-tool="text" aria-pressed="false" title="Place text">Text</button>
+              <button type="button" class="pop-btn pop-tool pop-left-rail-tool" data-tool="image" aria-pressed="false" title="Embed a raster image">Image</button>
+            </div>
+            <div class="pop-left-rail-doc">
+              <label class="pop-tb-style-lbl" for="pop-frame-pick">Frame</label>
+              <div class="pop-tb-comp-insert-row">
+                <select id="pop-frame-pick" class="pop-comp-pick" aria-label="Active frame"></select>
+                <button type="button" class="pop-btn" id="pop-frame-add" title="Add a new empty frame">+</button>
+              </div>
+              <div class="pop-left-rail-file" role="group" aria-label="Document file">
+                <button type="button" class="pop-btn pop-ribbon-file-btn" id="pop-doc-open" title="Load a .json document">Open…</button>
+                <button type="button" class="pop-btn pop-primary pop-ribbon-file-btn" id="pop-doc-save" title="Download document as .json">Save</button>
               </div>
             </div>
-            <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-view-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-view-panel">View</button>
-              <div class="pop-tb-dd-panel" id="pop-tb-view-panel" role="region" aria-labelledby="pop-tb-view-btn" hidden>
-                <p class="pop-tb-dd-desc">Zoom the canvas; reset returns to 100% and centered pan.</p>
-                <div class="pop-tb-grid pop-tb-grid-view" role="group" aria-label="Canvas zoom">
-                  <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
-                  <span class="pop-zoom-pct pop-tb-zoom-readout" id="pop-zoom-pct" aria-live="polite">100%</span>
-                  <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
-                  <button type="button" class="pop-btn pop-tb-span2" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset view</button>
-                </div>
-              </div>
+            <button type="button" class="pop-btn pop-left-rail-inspector-btn" id="pop-left-rail-inspector" aria-expanded="false" title="Show or hide the inspector (layers and properties)">☰</button>
+          </nav>
+          <div class="pop-left-inspector">
+            <div class="pop-left-inspector-head">
+              <span class="pop-left-inspector-head-lbl">Inspector</span>
+              <button type="button" class="pop-btn pop-left-inspector-pin" id="pop-left-inspector-pin" aria-pressed="false" title="Keep inspector open">Pin</button>
             </div>
-            <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-style-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-style-panel">Style</button>
-              <div class="pop-tb-dd-panel pop-tb-style-panel" id="pop-tb-style-panel" role="region" aria-labelledby="pop-tb-style-btn" hidden>
-                <p class="pop-tb-dd-desc">Defaults for new shapes; also updates selected rectangles, ellipses, and text.</p>
-                <div class="pop-tb-style-grid">
-                  <div class="pop-tb-style-block">
-                    <span class="pop-tb-style-lbl">Fill</span>
-                    <div class="pop-color-picker">
-                      <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
-                      <input type="color" class="pop-color-native" id="pop-fill" value="#3b82f6" tabindex="-1" />
-                      <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
-                        <div class="pop-color-panel-cap">Theme colors</div>
-                        <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
-                        <div class="pop-color-panel-cap">Standard colors</div>
-                        <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
-                        <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
-                      </div>
+            <div class="pop-left-inspector-scroll">
+              <div class="pop-inspector-section pop-ribbon-group" aria-labelledby="pop-ribbon-lbl-view">
+                <div class="pop-ribbon-group-main pop-ribbon-view-block" id="pop-tb-view-panel">
+                  <div class="pop-ribbon-view-zoom" role="group" aria-label="Canvas zoom">
+                    <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out" aria-label="Zoom out">−</button>
+                    <span class="pop-zoom-pct pop-tb-zoom-readout" id="pop-zoom-pct" aria-live="polite">100%</span>
+                    <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in" aria-label="Zoom in">+</button>
+                  </div>
+                  <button type="button" class="pop-btn" id="pop-zoom-fit" title="Fit entire canvas in view">Fit</button>
+                  <button type="button" class="pop-btn" id="pop-zoom-reset" title="Reset zoom and pan to 100%">Reset</button>
+                </div>
+                <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-view">View</span>
+              </div>
+              <div class="pop-inspector-section pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-export">
+                <div class="pop-ribbon-group-main" id="pop-tb-export-panel">
+                  <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Export SVG">
+                    <button type="button" class="pop-btn pop-primary pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-sel">
+                      <span class="pop-tb-grid-title">Selection</span>
+                      <span class="pop-tb-grid-sub">SVG</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-all">
+                      <span class="pop-tb-grid-title">Frame</span>
+                      <span class="pop-tb-grid-sub">SVG</span>
+                    </button>
+                  </div>
+                  <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Export HTML">
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-html">
+                      <span class="pop-tb-grid-title">HTML</span>
+                      <span class="pop-tb-grid-sub">Frame</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-export-html-all">
+                      <span class="pop-tb-grid-title">HTML</span>
+                      <span class="pop-tb-grid-sub">All frames</span>
+                    </button>
+                  </div>
+                  <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-export-grid" role="group" aria-label="Copy design tokens">
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ribbon-copy-tokens-json" title="Copy tokens as JSON">
+                      <span class="pop-tb-grid-title">tokens.json</span>
+                      <span class="pop-tb-grid-sub">Copy</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ribbon-copy-css-vars" title="Copy :root CSS variables">
+                      <span class="pop-tb-grid-title">:root CSS</span>
+                      <span class="pop-tb-grid-sub">Copy</span>
+                    </button>
+                  </div>
+                </div>
+                <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-export">Export</span>
+              </div>
+              <div class="pop-inspector-section pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-arrange">
+                <div class="pop-ribbon-group-main" id="pop-tb-arrange-panel">
+                  <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-arrange-grid" role="group" aria-label="Group and order">
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-group" disabled>
+                      <span class="pop-tb-grid-title">Group</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-ungroup" disabled>
+                      <span class="pop-tb-grid-title">Ungroup</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-bring-front" disabled>
+                      <span class="pop-tb-grid-title">Front</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-send-back" disabled>
+                      <span class="pop-tb-grid-title">Back</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-danger pop-tb-grid-btn pop-ribbon-action-compact pop-tb-span2" id="pop-delete" disabled>
+                      <span class="pop-tb-grid-title">Delete</span>
+                    </button>
+                  </div>
+                </div>
+                <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-arrange">Arrange</span>
+              </div>
+              <div class="pop-inspector-section pop-ribbon-group pop-ribbon-group-wide" aria-labelledby="pop-ribbon-lbl-comp">
+                <div class="pop-tb-dd-panel pop-tb-comp-panel pop-ribbon-comp-inner" id="pop-tb-comp-panel">
+                  <button type="button" class="pop-btn pop-primary pop-tb-comp-done" id="pop-comp-done" hidden>
+                    Done editing
+                  </button>
+                  <div class="pop-tb-grid pop-tb-grid-actions pop-ribbon-comp-actions" role="group" aria-label="Components">
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-create-comp" disabled>
+                      <span class="pop-tb-grid-title">Create</span>
+                      <span class="pop-tb-grid-sub">Component</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact" id="pop-detach" disabled>
+                      <span class="pop-tb-grid-title">Detach</span>
+                    </button>
+                    <button type="button" class="pop-btn pop-tb-grid-btn pop-ribbon-action-compact pop-tb-span2" id="pop-edit-comp" disabled>
+                      <span class="pop-tb-grid-title">Edit main</span>
+                    </button>
+                  </div>
+                  <div class="pop-tb-comp-insert pop-ribbon-comp-insert">
+                    <span class="pop-tb-style-lbl">Insert</span>
+                    <div class="pop-tb-comp-insert-row">
+                      <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
+                      <button type="button" class="pop-btn" id="pop-insert-inst">Place</button>
                     </div>
                   </div>
-                  <div class="pop-tb-style-block">
-                    <span class="pop-tb-style-lbl">Stroke</span>
-                    <div class="pop-color-picker">
-                      <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
-                      <input type="color" class="pop-color-native" id="pop-stroke" value="#1e3a5f" tabindex="-1" />
-                      <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
-                        <div class="pop-color-panel-cap">Theme colors</div>
-                        <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
-                        <div class="pop-color-panel-cap">Standard colors</div>
-                        <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
-                        <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
+                </div>
+                <span class="pop-ribbon-group-label" id="pop-ribbon-lbl-comp">Components</span>
+              </div>
+              <aside class="pop-layers" aria-label="Layers and properties">
+                <div class="pop-layer-aside-head">
+                  <div class="pop-layer-tabs" role="tablist" aria-label="Layer panel">
+                    <button type="button" class="pop-layer-tab pop-layer-tab-active" role="tab" id="pop-tab-layers" aria-selected="true" aria-controls="pop-layers-tree-panel">Layers</button>
+                    <button type="button" class="pop-layer-tab" role="tab" id="pop-tab-parent" aria-selected="false" aria-controls="pop-layers-parent-panel" title="See the path from the top of the tree down to the selected layer">Path</button>
+                  </div>
+                  <p class="pop-layer-aside-hint" id="pop-layer-aside-hint">Drag to reorder or nest · ⌘/Ctrl+click multi-select</p>
+                </div>
+                <div id="pop-layers-tree-panel" class="pop-layer-tab-panel" role="tabpanel" aria-labelledby="pop-tab-layers">
+                  <ul class="pop-layer-list" id="pop-layers" data-pop-layer-tree></ul>
+                </div>
+                <div id="pop-layers-parent-panel" class="pop-layer-tab-panel" hidden role="tabpanel" aria-labelledby="pop-tab-parent">
+                  <p class="pop-parent-panel-desc" id="pop-parent-panel-desc">Select a layer to see the path from the root down to it.</p>
+                  <ol class="pop-parent-chain" id="pop-parent-chain" aria-label="Path from root to selected layer, top to bottom"></ol>
+                  <button type="button" class="pop-btn pop-btn-block" id="pop-select-siblings" disabled title="Select every layer with the same parent as the current one">Select siblings</button>
+                </div>
+                <div class="pop-props">
+                  <h2 class="pop-panel-h">Position</h2>
+                  <div class="pop-prop-grid" id="pop-prop-grid">
+                    <label class="pop-field"><span class="pop-field-lbl">X</span><input type="number" id="pop-px" class="pop-num" step="1" disabled /></label>
+                    <label class="pop-field"><span class="pop-field-lbl">Y</span><input type="number" id="pop-py" class="pop-num" step="1" disabled /></label>
+                    <label class="pop-field" id="pop-pw-wrap"><span class="pop-field-lbl">W</span><input type="number" id="pop-pw" class="pop-num" step="1" min="1" disabled /></label>
+                    <label class="pop-field" id="pop-ph-wrap"><span class="pop-field-lbl">H</span><input type="number" id="pop-ph" class="pop-num" step="1" min="1" disabled /></label>
+                  </div>
+                  <label class="pop-field pop-field-fs" id="pop-fs-wrap"><span class="pop-field-lbl">Font size</span><input type="number" id="pop-pfs" class="pop-num" step="1" min="4" max="400" disabled /></label>
+                </div>
+                <div class="pop-props pop-style-section">
+                  <h2 class="pop-panel-h">Fill &amp; stroke</h2>
+                  <div class="pop-tb-style-grid">
+                    <div class="pop-appearance-colors">
+                      <div class="pop-tb-style-block" id="pop-fill-style-block">
+                        <span class="pop-tb-style-lbl">Fill</span>
+                        <div class="pop-color-picker">
+                          <button type="button" class="pop-color-swatch" id="pop-fill-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-fill-panel" title="Fill color"></button>
+                          <input type="color" class="pop-color-native" id="pop-fill" value="#a78bfa" tabindex="-1" />
+                          <div class="pop-color-panel" id="pop-fill-panel" role="dialog" aria-label="Fill color palette" hidden>
+                            <div class="pop-color-panel-cap">Theme colors</div>
+                            <div class="pop-color-grid pop-color-grid-theme" id="pop-fill-theme"></div>
+                            <div class="pop-color-panel-cap">Standard colors</div>
+                            <div class="pop-color-grid pop-color-grid-standard" id="pop-fill-standard"></div>
+                            <button type="button" class="pop-btn pop-color-more" id="pop-fill-more">More colors…</button>
+                          </div>
+                        </div>
+                      </div>
+                      <div id="pop-stroke-style-blocks" class="pop-stroke-col">
+                        <div class="pop-tb-style-block">
+                          <span class="pop-tb-style-lbl">Stroke</span>
+                          <div class="pop-color-picker">
+                            <button type="button" class="pop-color-swatch" id="pop-stroke-swatch" aria-haspopup="dialog" aria-expanded="false" aria-controls="pop-stroke-panel" title="Stroke color"></button>
+                            <input type="color" class="pop-color-native" id="pop-stroke" value="#4c1d95" tabindex="-1" />
+                            <div class="pop-color-panel" id="pop-stroke-panel" role="dialog" aria-label="Stroke color palette" hidden>
+                              <div class="pop-color-panel-cap">Theme colors</div>
+                              <div class="pop-color-grid pop-color-grid-theme" id="pop-stroke-theme"></div>
+                              <div class="pop-color-panel-cap">Standard colors</div>
+                              <div class="pop-color-grid pop-color-grid-standard" id="pop-stroke-standard"></div>
+                              <button type="button" class="pop-btn pop-color-more" id="pop-stroke-more">More colors…</button>
+                            </div>
+                          </div>
+                        </div>
+                        <label class="pop-tb-style-block pop-tb-stroke-w">
+                          <span class="pop-tb-style-lbl">Width</span>
+                          <input type="range" id="pop-stroke-w" min="0" max="12" value="2" aria-label="Stroke width" />
+                        </label>
                       </div>
                     </div>
+                    <div class="pop-appearance-sliders">
+                      <label class="pop-tb-style-block pop-tb-opacity">
+                        <span class="pop-tb-style-lbl">Opacity</span>
+                        <input type="range" id="pop-opacity" min="0" max="100" value="100" aria-label="Opacity" />
+                      </label>
+                      <label class="pop-tb-style-block pop-tb-rx" id="pop-rx-wrap">
+                        <span class="pop-tb-style-lbl">Radius</span>
+                        <input type="range" id="pop-rx" min="0" max="80" value="0" aria-label="Corner radius" />
+                      </label>
+                    </div>
+                    <div class="pop-token-bind-grid">
+                      <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Fill token</span>
+                        <select id="pop-fill-token-ref" class="pop-comp-pick" aria-label="Bind fill color to a design token"></select>
+                      </label>
+                      <label class="pop-field pop-field-fs" id="pop-stroke-token-wrap"><span class="pop-field-lbl">Stroke token</span>
+                        <select id="pop-stroke-token-ref" class="pop-comp-pick" aria-label="Bind stroke color to a design token"></select>
+                      </label>
+                    </div>
                   </div>
-                  <label class="pop-tb-style-block pop-tb-stroke-w">
-                    <span class="pop-tb-style-lbl">Stroke width</span>
-                    <input type="range" id="pop-stroke-w" min="0" max="12" value="2" aria-label="Stroke width" />
+                </div>
+                <div class="pop-props" id="pop-typography-props" hidden>
+                  <h2 class="pop-panel-h">Text</h2>
+                  <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Font</span><input type="text" id="pop-font-family" class="pop-num" spellcheck="false" /></label>
+                  <div class="pop-prop-grid">
+                    <label class="pop-field"><span class="pop-field-lbl">Weight</span><input type="number" id="pop-font-weight" class="pop-num" min="100" max="900" step="100" /></label>
+                    <label class="pop-field"><span class="pop-field-lbl">Tracking</span><input type="number" id="pop-letter-spacing" class="pop-num" step="0.5" /></label>
+                  </div>
+                  <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Line height</span><input type="number" id="pop-line-height" class="pop-num" min="0.5" max="3" step="0.05" /></label>
+                </div>
+                <div class="pop-props" id="pop-group-layout-props" hidden>
+                  <h2 class="pop-panel-h">HTML: children in group</h2>
+                  <p class="pop-panel-desc" id="pop-group-layout-desc">
+                    Canvas stays the same. This only changes the exported HTML/CSS: either keep each child’s position, or lay children out with flexbox (stack).
+                  </p>
+                  <label class="pop-field pop-field-fs"><span class="pop-field-lbl">Layout</span>
+                    <select id="pop-group-layout" aria-label="How children are arranged in exported HTML" aria-describedby="pop-group-layout-desc">
+                      <option value="none">Freeform — absolute positions</option>
+                      <option value="stack-v">Vertical stack (flex column)</option>
+                      <option value="stack-h">Horizontal stack (flex row)</option>
+                    </select>
+                  </label>
+                  <div class="pop-prop-grid">
+                    <label class="pop-field"><span class="pop-field-lbl">Gap</span><input type="number" id="pop-group-gap" class="pop-num" min="0" step="1" /></label>
+                    <label class="pop-field"><span class="pop-field-lbl">Pad</span><input type="number" id="pop-group-pad" class="pop-num" min="0" step="1" /></label>
+                  </div>
+                </div>
+                <div class="pop-props" id="pop-design-tokens-props" tabindex="-1">
+                  <h2 class="pop-panel-h">Design tokens</h2>
+                  <p class="pop-panel-desc">
+                    Export to code as <span class="pop-code">--pop-color-*</span>, <span class="pop-code">--pop-radius-*</span>, <span class="pop-code">--pop-space-*</span>. Use fill/stroke token picks above to keep layers tied to tokens in HTML export.
+                  </p>
+                  <h3 class="pop-panel-subh">Colors</h3>
+                  <ul class="pop-token-list" id="pop-token-color-list"></ul>
+                  <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-color-add">Add color</button>
+                  <h3 class="pop-panel-subh">Radius</h3>
+                  <ul class="pop-token-list" id="pop-token-radius-list"></ul>
+                  <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-radius-add">Add radius</button>
+                  <h3 class="pop-panel-subh">Space</h3>
+                  <ul class="pop-token-list" id="pop-token-space-list"></ul>
+                  <button type="button" class="pop-btn pop-btn-block pop-token-add-btn" id="pop-token-space-add">Add space</button>
+                  <div class="pop-token-handoff" role="group" aria-label="Copy tokens for your codebase">
+                    <button type="button" class="pop-btn" id="pop-copy-tokens-json">Copy tokens.json</button>
+                    <button type="button" class="pop-btn" id="pop-download-tokens-json">Download tokens.json</button>
+                    <button type="button" class="pop-btn" id="pop-copy-css-vars">Copy CSS variables</button>
+                  </div>
+                  <h3 class="pop-panel-subh">External design systems</h3>
+                  <p class="pop-panel-desc">
+                    Import token JSON from Material, Salt, or other tools (POP shape, W3C/DTCG, or flat color keys). Add stylesheet URLs so HTML export loads their CSS (fonts, variables).
+                  </p>
+                  <div class="pop-token-handoff" role="group" aria-label="Import tokens JSON">
+                    <input type="file" id="pop-token-import-file" accept=".json,application/json" hidden />
+                    <button type="button" class="pop-btn" id="pop-token-import-pick">Import tokens…</button>
+                    <label class="pop-check"><input type="checkbox" id="pop-token-import-replace" /> Replace all</label>
+                  </div>
+                  <label class="pop-field pop-field-fs">
+                    <span class="pop-field-lbl">HTML export stylesheets</span>
+                    <textarea id="pop-html-export-stylesheets" class="pop-ai-prompt" rows="3" placeholder="One URL per line" aria-label="Stylesheet URLs for exported HTML"></textarea>
+                  </label>
+                  <label class="pop-field pop-field-fs">
+                    <span class="pop-field-lbl">Preset</span>
+                    <select id="pop-ds-preset" aria-label="Apply design system stylesheet preset">
+                      <option value="">Apply preset…</option>
+                    </select>
                   </label>
                 </div>
-              </div>
-            </div>
-            <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-export-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-export-panel">Export</button>
-              <div class="pop-tb-dd-panel" id="pop-tb-export-panel" role="region" aria-labelledby="pop-tb-export-btn" hidden>
-                <p class="pop-tb-dd-desc">Save SVG to your device.</p>
-                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Export">
-                  <button type="button" class="pop-btn pop-primary pop-tb-grid-btn" id="pop-export-sel">
-                    <span class="pop-tb-grid-title">Selection</span>
-                    <span class="pop-tb-grid-sub">SVG of picked layers</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-export-all">
-                    <span class="pop-tb-grid-title">Full canvas</span>
-                    <span class="pop-tb-grid-sub">Everything on the artboard</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-arrange-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-arrange-panel">Selection</button>
-              <div class="pop-tb-dd-panel" id="pop-tb-arrange-panel" role="region" aria-labelledby="pop-tb-arrange-btn" hidden>
-                <p class="pop-tb-dd-desc">Organize the layers you have selected in the list or on the canvas.</p>
-                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Selection actions">
-                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-group" disabled>
-                    <span class="pop-tb-grid-title">Group</span>
-                    <span class="pop-tb-grid-sub">Merge into one folder</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-ungroup" disabled>
-                    <span class="pop-tb-grid-title">Ungroup</span>
-                    <span class="pop-tb-grid-sub">Split one group</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-danger pop-tb-grid-btn pop-tb-span2" id="pop-delete" disabled>
-                    <span class="pop-tb-grid-title">Delete</span>
-                    <span class="pop-tb-grid-sub">Remove selected layers</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div class="pop-tb-dd" data-pop-tb-dd>
-              <button type="button" class="pop-btn pop-tb-dd-trigger" id="pop-tb-comp-btn" aria-expanded="false" aria-haspopup="true" aria-controls="pop-tb-comp-panel">Components</button>
-              <div class="pop-tb-dd-panel pop-tb-comp-panel" id="pop-tb-comp-panel" role="region" aria-labelledby="pop-tb-comp-btn" hidden>
-                <p class="pop-tb-dd-desc">Reusable symbols and instances.</p>
-                <div class="pop-tb-grid pop-tb-grid-actions" role="group" aria-label="Component actions">
-                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-create-comp" disabled>
-                    <span class="pop-tb-grid-title">Create component</span>
-                    <span class="pop-tb-grid-sub">From selection</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tb-grid-btn" id="pop-detach" disabled>
-                    <span class="pop-tb-grid-title">Detach instance</span>
-                    <span class="pop-tb-grid-sub">Edit as raw layers</span>
-                  </button>
-                  <button type="button" class="pop-btn pop-tb-grid-btn pop-tb-span2" id="pop-edit-comp" disabled>
-                    <span class="pop-tb-grid-title">Edit main</span>
-                    <span class="pop-tb-grid-sub">Open component definition</span>
-                  </button>
-                </div>
-                <div class="pop-tb-comp-insert">
-                  <span class="pop-tb-style-lbl">Insert instance</span>
-                  <div class="pop-tb-comp-insert-row">
-                    <select id="pop-comp-pick" class="pop-comp-pick" aria-label="Component to insert"></select>
-                    <button type="button" class="pop-btn" id="pop-insert-inst">Place</button>
+                <div class="pop-props pop-props-tight">
+                  <div class="pop-symmetry">
+                    <label class="pop-check"><input type="checkbox" id="pop-guides" checked /><span>Guides &amp; snap</span></label>
+                    <p class="pop-hint" id="pop-sym-hint"></p>
                   </div>
                 </div>
-              </div>
+              </aside>
             </div>
-            <input type="file" id="pop-file" accept="image/*" hidden />
           </div>
         </div>
-        <p class="pop-toolbar-hint" id="pop-toolbar-hint">Toolbar is hidden. Pin it to use tools, zoom, colors, and export.</p>
-      </div>
-      <div class="pop-comp-banner" id="pop-comp-banner" hidden>
-        <span id="pop-comp-banner-text"></span>
-        <button type="button" class="pop-btn pop-primary" id="pop-comp-done">Done editing</button>
-      </div>
-      <div class="pop-main">
-        <aside class="pop-layers" aria-label="Layers and transform">
-          <div class="pop-layer-aside-head">
-            <div class="pop-layer-tabs" role="tablist" aria-label="Layer panel">
-              <button type="button" class="pop-layer-tab pop-layer-tab-active" role="tab" id="pop-tab-layers" aria-selected="true" aria-controls="pop-layers-tree-panel">Layers</button>
-              <button type="button" class="pop-layer-tab" role="tab" id="pop-tab-parent" aria-selected="false" aria-controls="pop-layers-parent-panel">Parent</button>
-            </div>
-            <p class="pop-layer-aside-hint">Drag a row to reorder or nest (lower half nests). ⌘ or Ctrl+click to multi-select.</p>
-          </div>
-          <div id="pop-layers-tree-panel" class="pop-layer-tab-panel" role="tabpanel" aria-labelledby="pop-tab-layers">
-            <ul class="pop-layer-list" id="pop-layers" data-pop-layer-tree></ul>
-          </div>
-          <div id="pop-layers-parent-panel" class="pop-layer-tab-panel" hidden role="tabpanel" aria-labelledby="pop-tab-parent">
-            <p class="pop-parent-panel-desc" id="pop-parent-panel-desc">Select a layer to see its parent chain.</p>
-            <ol class="pop-parent-chain" id="pop-parent-chain" aria-label="Parent chain from root to selection"></ol>
-            <button type="button" class="pop-btn pop-btn-block" id="pop-select-siblings" disabled>Select all siblings</button>
-          </div>
-          <div class="pop-props">
-            <h2>Transform</h2>
-            <div class="pop-prop-grid" id="pop-prop-grid">
-              <label class="pop-field"><span class="pop-field-lbl">X</span><input type="number" id="pop-px" class="pop-num" step="1" disabled /></label>
-              <label class="pop-field"><span class="pop-field-lbl">Y</span><input type="number" id="pop-py" class="pop-num" step="1" disabled /></label>
-              <label class="pop-field" id="pop-pw-wrap"><span class="pop-field-lbl">W</span><input type="number" id="pop-pw" class="pop-num" step="1" min="1" disabled /></label>
-              <label class="pop-field" id="pop-ph-wrap"><span class="pop-field-lbl">H</span><input type="number" id="pop-ph" class="pop-num" step="1" min="1" disabled /></label>
-            </div>
-            <label class="pop-field pop-field-fs" id="pop-fs-wrap"><span class="pop-field-lbl">Font size</span><input type="number" id="pop-pfs" class="pop-num" step="1" min="4" max="400" disabled /></label>
-            <div class="pop-symmetry">
-              <label class="pop-check"><input type="checkbox" id="pop-guides" checked /><span>Symmetry guides &amp; snap</span></label>
-              <p class="pop-hint" id="pop-sym-hint"></p>
-            </div>
-          </div>
-        </aside>
-        <div class="pop-canvas-wrap" title="Ctrl or ⌘ + scroll (or trackpad pinch) to zoom toward the pointer">
-          <svg class="pop-canvas" id="pop-svg" viewBox="0 0 ${VIEW_W} ${VIEW_H}" width="${VIEW_W}" height="${VIEW_H}" role="img" aria-label="Design canvas">
-            <defs>
-              <pattern id="pop-grid" width="16" height="16" patternUnits="userSpaceOnUse">
-                <rect width="16" height="16" fill="var(--canvas-cell)"/>
-                <path d="M 16 0 L 0 0 0 16" fill="none" stroke="var(--canvas-line)" stroke-width="0.5"/>
-              </pattern>
-            </defs>
-            <rect class="pop-canvas-bg" x="0" y="0" width="${VIEW_W}" height="${VIEW_H}" fill="url(#pop-grid)" pointer-events="none"/>
+        <div class="pop-canvas-wrap" title="⌘+scroll to pan · Ctrl+scroll or pinch to zoom toward the pointer">
+          <svg class="pop-canvas" id="pop-svg" viewBox="0 0 ${VIEW_W} ${VIEW_H}" width="${VIEW_W}" height="${VIEW_H}" role="img" aria-label="Vibe designing canvas for web and mobile layouts">
             <g id="pop-viewport" transform="translate(0 0) scale(1)">
+              <rect class="pop-canvas-bg" id="pop-canvas-bg" x="0" y="0" width="${VIEW_W}" height="${VIEW_H}" fill="transparent" pointer-events="none"/>
+              <g id="pop-frame-outlines" pointer-events="none"></g>
               <g id="pop-guides-back" pointer-events="none"></g>
               <g id="pop-items"></g>
               <g id="pop-handles"></g>
               <g id="pop-guides-front" pointer-events="none"></g>
             </g>
           </svg>
+          <div class="pop-zoom-dock" role="toolbar" aria-label="Canvas zoom">
+            <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-out-dock" aria-label="Zoom out" title="Zoom out">−</button>
+            <span class="pop-zoom-pct pop-zoom-dock-readout" id="pop-zoom-pct-dock" aria-live="polite">100%</span>
+            <button type="button" class="pop-btn pop-zoom-btn" id="pop-zoom-in-dock" aria-label="Zoom in" title="Zoom in">+</button>
+            <button type="button" class="pop-btn pop-zoom-dock-fit" id="pop-zoom-fit-dock" title="Fit entire canvas in view">Fit</button>
+            <button type="button" class="pop-btn pop-zoom-dock-reset" id="pop-zoom-reset-dock" title="Reset zoom to 100% and pan">100%</button>
+          </div>
         </div>
+        <aside class="pop-ai-pane" aria-label="AI design assistant for vibe designing">
+          <div class="pop-ai-pane-head">
+            <h2 class="pop-panel-h">Design assistant</h2>
+            <p class="pop-ai-pane-tagline">Web &amp; mobile · JSON patches</p>
+          </div>
+          <div class="pop-ai-pane-chat pop-ai-log" id="pop-ai-log" role="log" aria-live="polite"></div>
+          <div class="pop-ai-pane-composer">
+            <textarea
+              class="pop-ai-prompt"
+              id="pop-ai-prompt"
+              placeholder="Example: In frame 1, add a mobile-style header bar (full width), a hero title, and two card rows with muted fills—keep spacing comfortable for touch."
+              aria-label="Design request for POP vibe designing assistant"
+            ></textarea>
+            <div class="pop-ai-actions">
+              <button type="button" class="pop-btn pop-primary" id="pop-ai-send">Apply with AI</button>
+              <span class="pop-hint" id="pop-ai-status"></span>
+            </div>
+          </div>
+          <details class="pop-ai-settings">
+            <summary>Google AI (Gemini)</summary>
+            <p class="pop-panel-desc">
+              Describe web or mobile layouts in plain language; the model applies structured edits to your canvas.
+              Get a key from
+              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a>.
+              The model must reply with JSON patch operations only. Browser calls may be blocked by CORS; use a
+              same-origin proxy if needed.
+            </p>
+            <div class="pop-ai-field-grid">
+              <label class="pop-field pop-field-fs">
+                <span class="pop-field-lbl">Model</span>
+                <select id="pop-ai-model" aria-label="Gemini model"></select>
+              </label>
+              <label class="pop-field pop-field-fs">
+                <span class="pop-field-lbl">API key</span>
+                <input
+                  type="password"
+                  id="pop-ai-key"
+                  placeholder="Google AI Studio API key"
+                  autocomplete="off"
+                />
+              </label>
+            </div>
+          </details>
+        </aside>
       </div>
+      <input type="file" id="pop-file" accept="image/*" hidden />
+      <input type="file" id="pop-doc-file" accept="application/json,.json" hidden />
     </div>
+
   `
 
   const svg = root.querySelector<SVGSVGElement>('#pop-svg')!
@@ -326,6 +603,7 @@ export function mount(root: HTMLElement): void {
   const layersParentPanel = root.querySelector<HTMLElement>('#pop-layers-parent-panel')!
   const parentPanelDesc = root.querySelector<HTMLParagraphElement>('#pop-parent-panel-desc')!
   const parentChainEl = root.querySelector<HTMLOListElement>('#pop-parent-chain')!
+  const layerAsideHint = root.querySelector<HTMLParagraphElement>('#pop-layer-aside-hint')!
   const btnSelectSiblings = root.querySelector<HTMLButtonElement>('#pop-select-siblings')!
   const fileInput = root.querySelector<HTMLInputElement>('#pop-file')!
   const fillInput = root.querySelector<HTMLInputElement>('#pop-fill')!
@@ -336,13 +614,13 @@ export function mount(root: HTMLElement): void {
   const btnDelete = root.querySelector<HTMLButtonElement>('#pop-delete')!
   const btnGroup = root.querySelector<HTMLButtonElement>('#pop-group')!
   const btnUngroup = root.querySelector<HTMLButtonElement>('#pop-ungroup')!
+  const btnBringFront = root.querySelector<HTMLButtonElement>('#pop-bring-front')!
+  const btnSendBack = root.querySelector<HTMLButtonElement>('#pop-send-back')!
   const btnCreateComp = root.querySelector<HTMLButtonElement>('#pop-create-comp')!
   const btnDetach = root.querySelector<HTMLButtonElement>('#pop-detach')!
   const btnEditComp = root.querySelector<HTMLButtonElement>('#pop-edit-comp')!
   const selCompPick = root.querySelector<HTMLSelectElement>('#pop-comp-pick')!
   const btnInsertInst = root.querySelector<HTMLButtonElement>('#pop-insert-inst')!
-  const compBanner = root.querySelector<HTMLElement>('#pop-comp-banner')!
-  const compBannerText = root.querySelector<HTMLElement>('#pop-comp-banner-text')!
   const btnCompDone = root.querySelector<HTMLButtonElement>('#pop-comp-done')!
   const toolButtons = root.querySelectorAll<HTMLButtonElement>('.pop-tool')
   const guidesBack = root.querySelector<SVGGElement>('#pop-guides-back')!
@@ -368,25 +646,390 @@ export function mount(root: HTMLElement): void {
   const strokeStandardHost = root.querySelector<HTMLElement>('#pop-stroke-standard')!
   const fillMoreBtn = root.querySelector<HTMLButtonElement>('#pop-fill-more')!
   const strokeMoreBtn = root.querySelector<HTMLButtonElement>('#pop-stroke-more')!
+  const opacityInput = root.querySelector<HTMLInputElement>('#pop-opacity')!
+  const rxInput = root.querySelector<HTMLInputElement>('#pop-rx')!
+  const strokeStyleBlocks = root.querySelector<HTMLElement>('#pop-stroke-style-blocks')!
+  const fillStyleBlock = root.querySelector<HTMLElement>('#pop-fill-style-block')!
+  const rxWrap = root.querySelector<HTMLElement>('#pop-rx-wrap')!
+  const styleSection = root.querySelector<HTMLElement>('.pop-style-section')!
   const btnZoomIn = root.querySelector<HTMLButtonElement>('#pop-zoom-in')!
   const btnZoomOut = root.querySelector<HTMLButtonElement>('#pop-zoom-out')!
   const btnZoomReset = root.querySelector<HTMLButtonElement>('#pop-zoom-reset')!
+  const btnZoomFit = root.querySelector<HTMLButtonElement>('#pop-zoom-fit')!
   const elZoomPct = root.querySelector<HTMLElement>('#pop-zoom-pct')!
-  const toolbarWrap = root.querySelector<HTMLElement>('#pop-toolbar-wrap')!
-  const btnToolbarPin = root.querySelector<HTMLButtonElement>('#pop-toolbar-pin')!
-  const toolbarExpanded = root.querySelector<HTMLElement>('#pop-toolbar-expanded')!
-  const toolbarHint = root.querySelector<HTMLElement>('#pop-toolbar-hint')!
-  const pinLabelEl = btnToolbarPin.querySelector<HTMLElement>('.pop-toolbar-pin-label')!
+  const btnZoomInDock = root.querySelector<HTMLButtonElement>('#pop-zoom-in-dock')!
+  const btnZoomOutDock = root.querySelector<HTMLButtonElement>('#pop-zoom-out-dock')!
+  const btnZoomResetDock = root.querySelector<HTMLButtonElement>('#pop-zoom-reset-dock')!
+  const btnZoomFitDock = root.querySelector<HTMLButtonElement>('#pop-zoom-fit-dock')!
+  const elZoomPctDock = root.querySelector<HTMLElement>('#pop-zoom-pct-dock')!
+  const canvasBgEl = root.querySelector<SVGRectElement>('#pop-canvas-bg')!
+  const frameOutlinesG = root.querySelector<SVGGElement>('#pop-frame-outlines')!
+  const popFramePick = root.querySelector<HTMLSelectElement>('#pop-frame-pick')!
+  const btnFrameAdd = root.querySelector<HTMLButtonElement>('#pop-frame-add')!
+  const btnDocOpen = root.querySelector<HTMLButtonElement>('#pop-doc-open')!
+  const btnDocSave = root.querySelector<HTMLButtonElement>('#pop-doc-save')!
+  const docFileInput = root.querySelector<HTMLInputElement>('#pop-doc-file')!
+  const btnExportHtml = root.querySelector<HTMLButtonElement>('#pop-export-html')!
+  const btnExportHtmlAll = root.querySelector<HTMLButtonElement>('#pop-export-html-all')!
+  const typographyProps = root.querySelector<HTMLElement>('#pop-typography-props')!
+  const inpFontFamily = root.querySelector<HTMLInputElement>('#pop-font-family')!
+  const inpFontWeight = root.querySelector<HTMLInputElement>('#pop-font-weight')!
+  const inpLetterSpacing = root.querySelector<HTMLInputElement>('#pop-letter-spacing')!
+  const inpLineHeight = root.querySelector<HTMLInputElement>('#pop-line-height')!
+  const groupLayoutProps = root.querySelector<HTMLElement>('#pop-group-layout-props')!
+  const selGroupLayout = root.querySelector<HTMLSelectElement>('#pop-group-layout')!
+  const inpGroupGap = root.querySelector<HTMLInputElement>('#pop-group-gap')!
+  const inpGroupPad = root.querySelector<HTMLInputElement>('#pop-group-pad')!
+  const fillTokenSelect = root.querySelector<HTMLSelectElement>('#pop-fill-token-ref')!
+  const strokeTokenSelect = root.querySelector<HTMLSelectElement>('#pop-stroke-token-ref')!
+  const strokeTokenWrap = root.querySelector<HTMLElement>('#pop-stroke-token-wrap')!
+  const tokenColorList = root.querySelector<HTMLUListElement>('#pop-token-color-list')!
+  const tokenRadiusList = root.querySelector<HTMLUListElement>('#pop-token-radius-list')!
+  const tokenSpaceList = root.querySelector<HTMLUListElement>('#pop-token-space-list')!
+  const btnTokenColorAdd = root.querySelector<HTMLButtonElement>('#pop-token-color-add')!
+  const btnTokenRadiusAdd = root.querySelector<HTMLButtonElement>('#pop-token-radius-add')!
+  const btnTokenSpaceAdd = root.querySelector<HTMLButtonElement>('#pop-token-space-add')!
+  const btnCopyTokensJson = root.querySelector<HTMLButtonElement>('#pop-copy-tokens-json')!
+  const btnDownloadTokensJson = root.querySelector<HTMLButtonElement>('#pop-download-tokens-json')!
+  const btnCopyCssVars = root.querySelector<HTMLButtonElement>('#pop-copy-css-vars')!
+  const btnRibbonCopyTokensJson = root.querySelector<HTMLButtonElement>('#pop-ribbon-copy-tokens-json')!
+  const btnRibbonCopyCssVars = root.querySelector<HTMLButtonElement>('#pop-ribbon-copy-css-vars')!
+  const tokenImportFile = root.querySelector<HTMLInputElement>('#pop-token-import-file')!
+  const btnTokenImportPick = root.querySelector<HTMLButtonElement>('#pop-token-import-pick')!
+  const tokenImportReplace = root.querySelector<HTMLInputElement>('#pop-token-import-replace')!
+  const taHtmlExportStylesheets = root.querySelector<HTMLTextAreaElement>('#pop-html-export-stylesheets')!
+  const selDsPreset = root.querySelector<HTMLSelectElement>('#pop-ds-preset')!
+  const aiKeyInput = root.querySelector<HTMLInputElement>('#pop-ai-key')!
+  const aiModelSelect = root.querySelector<HTMLSelectElement>('#pop-ai-model')!
 
-  /** Pinned unless user chose to hide (`'0'` in storage). */
-  let toolbarPinned = localStorage.getItem(TOOLBAR_PIN_STORAGE_KEY) !== '0'
-  let openTbDropdown: { panel: HTMLElement; trigger: HTMLButtonElement } | null = null
+  function parseStylesheetLines(text: string): string[] {
+    return text
+      .split(/\n/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+  }
 
-  function closeTbDropdown(): void {
-    if (!openTbDropdown) return
-    openTbDropdown.panel.hidden = true
-    openTbDropdown.trigger.setAttribute('aria-expanded', 'false')
-    openTbDropdown = null
+  function syncHtmlExportStylesheetsUi(): void {
+    taHtmlExportStylesheets.value = htmlExportStylesheets.join('\n')
+  }
+  const aiLogEl = root.querySelector<HTMLElement>('#pop-ai-log')!
+  const aiPromptTextarea = root.querySelector<HTMLTextAreaElement>('#pop-ai-prompt')!
+  const btnAiSend = root.querySelector<HTMLButtonElement>('#pop-ai-send')!
+  const aiStatusEl = root.querySelector<HTMLElement>('#pop-ai-status')!
+  const leftShellEl = root.querySelector<HTMLElement>('#pop-left-shell')!
+  const btnRailInspector = root.querySelector<HTMLButtonElement>('#pop-left-rail-inspector')!
+  const btnInspectorPin = root.querySelector<HTMLButtonElement>('#pop-left-inspector-pin')!
+
+  function applyLeftInspectorVisibility(): void {
+    const open =
+      leftInspectorPinned ||
+      leftInspectorPeek ||
+      selected.size > 0 ||
+      tool !== 'select'
+    leftShellEl.classList.toggle('pop-left-inspector-open', open)
+    btnRailInspector.setAttribute('aria-expanded', String(open))
+    btnInspectorPin.setAttribute('aria-pressed', String(leftInspectorPinned))
+  }
+
+  function appendAiLog(kind: 'user' | 'model' | 'err' | 'sys', text: string): void {
+    const p = document.createElement('p')
+    p.classList.add('pop-ai-log-msg')
+    if (kind === 'user') p.classList.add('pop-ai-log-msg-user')
+    else if (kind === 'err') p.classList.add('pop-ai-log-msg-err')
+    else p.classList.add('pop-ai-log-msg-model')
+    p.textContent = kind === 'sys' ? `POP: ${text}` : text
+    aiLogEl.appendChild(p)
+    aiLogEl.scrollTop = aiLogEl.scrollHeight
+  }
+
+  const geminiModelIds = new Set(GOOGLE_AI_STUDIO_GEMINI_MODELS.map((m) => m.id))
+  for (const m of GOOGLE_AI_STUDIO_GEMINI_MODELS) {
+    const opt = document.createElement('option')
+    opt.value = m.id
+    opt.textContent = m.label
+    aiModelSelect.appendChild(opt)
+  }
+
+  for (const p of DESIGN_SYSTEM_PRESETS) {
+    if (p.id === 'none') continue
+    const opt = document.createElement('option')
+    opt.value = p.id
+    opt.textContent = p.label
+    selDsPreset.appendChild(opt)
+  }
+
+  const aiStored = readAiSettingsFromStorage()
+  let initialModel =
+    aiStored.model || (import.meta.env.VITE_POP_AI_MODEL as string | undefined) || defaultGeminiModelId()
+  if (!geminiModelIds.has(initialModel)) initialModel = defaultGeminiModelId()
+  aiModelSelect.value = initialModel
+  if (aiStored.apiKey) aiKeyInput.value = aiStored.apiKey
+  else if (import.meta.env.VITE_POP_AI_KEY) aiKeyInput.value = import.meta.env.VITE_POP_AI_KEY
+
+  aiKeyInput.addEventListener('blur', () => writeAiKey(aiKeyInput.value))
+  aiModelSelect.addEventListener('change', () => writeAiModel(aiModelSelect.value))
+
+  btnRailInspector.addEventListener('click', () => {
+    if (leftInspectorPinned) {
+      leftInspectorPinned = false
+      writeLeftInspectorPinned(false)
+      leftInspectorPeek = false
+    } else {
+      leftInspectorPeek = !leftInspectorPeek
+    }
+    applyLeftInspectorVisibility()
+  })
+  btnInspectorPin.addEventListener('click', () => {
+    leftInspectorPinned = !leftInspectorPinned
+    writeLeftInspectorPinned(leftInspectorPinned)
+    if (leftInspectorPinned) leftInspectorPeek = false
+    applyLeftInspectorVisibility()
+  })
+  applyLeftInspectorVisibility()
+
+  let tokenUiSyncing = false
+
+  function ensureTokenBuckets(): void {
+    if (!tokens.colors) tokens.colors = {}
+    if (!tokens.radii) tokens.radii = {}
+    if (!tokens.space) tokens.space = {}
+  }
+
+  function syncColorTokenRefsOnRename(oldKey: string, newKey: string): void {
+    if (oldKey === newKey || !oldKey) return
+    const apply = (it: SceneNode): void => {
+      if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text') {
+        if (it.fillToken === oldKey) it.fillToken = newKey
+      }
+      if (it.type === 'rect' || it.type === 'ellipse') {
+        if (it.strokeToken === oldKey) it.strokeToken = newKey
+      }
+    }
+    for (const it of nodes.values()) apply(it)
+    for (const def of definitions.values()) {
+      for (const it of Object.values(def.nodes)) apply(it as SceneNode)
+    }
+  }
+
+  function renameColorTokenKey(oldKey: string, newKey: string): void {
+    ensureTokenBuckets()
+    const colors = tokens.colors!
+    if (!(oldKey in colors)) return
+    const v = colors[oldKey]!
+    delete colors[oldKey]
+    colors[newKey] = v
+    syncColorTokenRefsOnRename(oldKey, newKey)
+  }
+
+  function clearFillStrokeTokenRefs(key: string): void {
+    const apply = (it: SceneNode): void => {
+      if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text') {
+        if (it.fillToken === key) delete it.fillToken
+      }
+      if (it.type === 'rect' || it.type === 'ellipse') {
+        if (it.strokeToken === key) delete it.strokeToken
+      }
+    }
+    for (const it of nodes.values()) apply(it)
+    for (const def of definitions.values()) {
+      for (const it of Object.values(def.nodes)) apply(it as SceneNode)
+    }
+  }
+
+  function refreshFillStrokeTokenSelects(): void {
+    tokenUiSyncing = true
+    try {
+      ensureTokenBuckets()
+      const colorKeys = Object.keys(tokens.colors ?? {}).sort()
+      const rebuild = (sel: HTMLSelectElement, cur: string | undefined, mixed: boolean): void => {
+        sel.replaceChildren()
+        const o0 = document.createElement('option')
+        o0.value = ''
+        o0.textContent = mixed ? '— Mixed —' : '— None —'
+        sel.appendChild(o0)
+        for (const k of colorKeys) {
+          const o = document.createElement('option')
+          o.value = k
+          o.textContent = k
+          sel.appendChild(o)
+        }
+        if (mixed || cur === undefined || cur === '') sel.value = ''
+        else if (colorKeys.includes(cur)) sel.value = cur
+        else sel.value = ''
+      }
+
+      const sel = [...selected]
+      const fillLeaves = sel.filter((id) => ['rect', 'ellipse', 'text'].includes(nodes.get(id)?.type ?? ''))
+      let fillCur: string | undefined
+      let fillMixed = false
+      if (fillLeaves.length > 0) {
+        const fts = fillLeaves.map((id) => (nodes.get(id) as { fillToken?: string }).fillToken)
+        const defined = fts.filter((x): x is string => typeof x === 'string' && x.length > 0)
+        const u = [...new Set(defined)]
+        if (u.length === 1) fillCur = u[0]
+        else if (u.length > 1) fillMixed = true
+      }
+      rebuild(fillTokenSelect, fillCur, fillMixed)
+
+      const strokeLeaves = sel.filter((id) => ['rect', 'ellipse'].includes(nodes.get(id)?.type ?? ''))
+      let strokeCur: string | undefined
+      let strokeMixed = false
+      if (strokeLeaves.length > 0) {
+        const sts = strokeLeaves.map((id) => (nodes.get(id) as { strokeToken?: string }).strokeToken)
+        const defined = sts.filter((x): x is string => typeof x === 'string' && x.length > 0)
+        const u = [...new Set(defined)]
+        if (u.length === 1) strokeCur = u[0]
+        else if (u.length > 1) strokeMixed = true
+      }
+      rebuild(strokeTokenSelect, strokeCur, strokeMixed)
+    } finally {
+      tokenUiSyncing = false
+    }
+  }
+
+  function renderTokensPanel(): void {
+    ensureTokenBuckets()
+    const colors = tokens.colors!
+    const radii = tokens.radii!
+    const space = tokens.space!
+
+    tokenColorList.replaceChildren()
+    for (const [key, val] of Object.entries(colors).sort(([a], [b]) => a.localeCompare(b))) {
+      const li = document.createElement('li')
+      li.className = 'pop-token-row'
+      const keyInp = document.createElement('input')
+      keyInp.type = 'text'
+      keyInp.className = 'pop-num pop-token-key'
+      keyInp.value = key
+      keyInp.spellcheck = false
+      keyInp.autocomplete = 'off'
+      let prevKey = key
+      const colInp = document.createElement('input')
+      colInp.type = 'color'
+      colInp.className = 'pop-token-color'
+      colInp.value = normalizeHex6(val)
+      colInp.title = `Color for token “${key}”`
+      colInp.addEventListener('input', () => {
+        const k = keyInp.value.trim() || prevKey
+        colors[k] = colInp.value
+        schedulePersist()
+        commit()
+      })
+      keyInp.addEventListener('blur', () => {
+        const nk = keyInp.value.trim()
+        if (!nk || nk === prevKey) {
+          keyInp.value = prevKey
+          return
+        }
+        renameColorTokenKey(prevKey, nk)
+        prevKey = nk
+        renderTokensPanel()
+        refreshFillStrokeTokenSelects()
+        schedulePersist()
+        commit()
+      })
+      const rm = document.createElement('button')
+      rm.type = 'button'
+      rm.className = 'pop-btn pop-token-rm'
+      rm.textContent = 'Remove'
+      rm.title = `Remove token “${key}”`
+      rm.addEventListener('click', () => {
+        delete colors[prevKey]
+        clearFillStrokeTokenRefs(prevKey)
+        renderTokensPanel()
+        refreshFillStrokeTokenSelects()
+        schedulePersist()
+        commit()
+      })
+      li.appendChild(keyInp)
+      li.appendChild(colInp)
+      li.appendChild(rm)
+      tokenColorList.appendChild(li)
+    }
+
+    const numRow = (list: HTMLUListElement, bucket: Record<string, number>): void => {
+      list.replaceChildren()
+      for (const [key, val] of Object.entries(bucket).sort(([a], [b]) => a.localeCompare(b))) {
+        const li = document.createElement('li')
+        li.className = 'pop-token-row'
+        const keyInp = document.createElement('input')
+        keyInp.type = 'text'
+        keyInp.className = 'pop-num pop-token-key'
+        keyInp.value = key
+        keyInp.spellcheck = false
+        let prevKey = key
+        const num = document.createElement('input')
+        num.type = 'number'
+        num.className = 'pop-num pop-token-num'
+        num.min = '0'
+        num.step = '1'
+        num.value = String(Math.round(val))
+        num.addEventListener('input', () => {
+          const k = keyInp.value.trim() || prevKey
+          const v = parseFloat(num.value)
+          if (Number.isFinite(v) && v >= 0) bucket[k] = v
+          schedulePersist()
+        })
+        keyInp.addEventListener('blur', () => {
+          const nk = keyInp.value.trim()
+          if (!nk || nk === prevKey) {
+            keyInp.value = prevKey
+            return
+          }
+          const v = bucket[prevKey]!
+          delete bucket[prevKey]
+          bucket[nk] = v
+          prevKey = nk
+          renderTokensPanel()
+          schedulePersist()
+        })
+        const rm = document.createElement('button')
+        rm.type = 'button'
+        rm.className = 'pop-btn pop-token-rm'
+        rm.textContent = 'Remove'
+        rm.title = 'Remove token'
+        rm.addEventListener('click', () => {
+          delete bucket[prevKey]
+          renderTokensPanel()
+          schedulePersist()
+        })
+        li.appendChild(keyInp)
+        li.appendChild(num)
+        li.appendChild(rm)
+        list.appendChild(li)
+      }
+    }
+
+    numRow(tokenRadiusList, radii)
+    numRow(tokenSpaceList, space)
+  }
+
+  function copyTextToClipboard(text: string): void {
+    void navigator.clipboard.writeText(text).catch(() => {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.position = 'fixed'
+        ta.style.left = '-9999px'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      } catch {
+        /* ignore */
+      }
+    })
+  }
+
+  function downloadTextFile(text: string, filename: string, mime: string): void {
+    const blob = new Blob([text], { type: mime })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.rel = 'noopener'
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   function updateFillSwatch(): void {
@@ -413,20 +1056,6 @@ export function mount(root: HTMLElement): void {
     openColorPicker = null
   }
 
-  function panelRectIntersectsBanner(
-    left: number,
-    top: number,
-    pw: number,
-    ph: number,
-  ): boolean {
-    if (compBanner.hidden) return false
-    const br = compBanner.getBoundingClientRect()
-    if (br.width === 0 || br.height === 0) return false
-    const prRight = left + pw
-    const prBottom = top + ph
-    return !(prRight <= br.left || left >= br.right || prBottom <= br.top || top >= br.bottom)
-  }
-
   function positionColorPanel(panel: HTMLElement, swatch: HTMLButtonElement): void {
     panel.style.position = 'fixed'
     panel.style.zIndex = '2000'
@@ -444,79 +1073,8 @@ export function mount(root: HTMLElement): void {
       top = Math.max(margin, r.top - ph - margin)
     }
 
-    if (panelRectIntersectsBanner(left, top, pw, ph)) {
-      const above = r.top - ph - margin
-      if (above >= margin && !panelRectIntersectsBanner(left, above, pw, ph)) {
-        top = above
-      } else {
-        const br = compBanner.getBoundingClientRect()
-        const belowBanner = br.bottom + margin
-        if (belowBanner + ph <= window.innerHeight - margin) {
-          top = belowBanner
-        } else if (above >= margin) {
-          top = above
-        }
-      }
-    }
-
     panel.style.left = `${left}px`
     panel.style.top = `${top}px`
-  }
-
-  function positionTbDropdown(panel: HTMLElement, trigger: HTMLElement): void {
-    panel.style.position = 'fixed'
-    panel.style.zIndex = '1999'
-    const r = trigger.getBoundingClientRect()
-    const margin = 8
-    const pw = panel.offsetWidth
-    const ph = panel.offsetHeight
-    let left = r.left
-    let top = r.bottom + margin
-    if (left + pw > window.innerWidth - margin) {
-      left = Math.max(margin, window.innerWidth - pw - margin)
-    }
-    if (left < margin) left = margin
-    if (top + ph > window.innerHeight - margin) {
-      top = Math.max(margin, r.top - ph - margin)
-    }
-
-    if (panelRectIntersectsBanner(left, top, pw, ph)) {
-      const above = r.top - ph - margin
-      if (above >= margin && !panelRectIntersectsBanner(left, above, pw, ph)) {
-        top = above
-      } else {
-        const br = compBanner.getBoundingClientRect()
-        const belowBanner = br.bottom + margin
-        if (belowBanner + ph <= window.innerHeight - margin) {
-          top = belowBanner
-        } else if (above >= margin) {
-          top = above
-        }
-      }
-    }
-
-    panel.style.left = `${left}px`
-    panel.style.top = `${top}px`
-  }
-
-  function openTbDropdownPanel(panel: HTMLElement, trigger: HTMLButtonElement): void {
-    closeColorPickerPanel()
-    closeTbDropdown()
-    panel.hidden = false
-    trigger.setAttribute('aria-expanded', 'true')
-    openTbDropdown = { panel, trigger }
-    requestAnimationFrame(() => {
-      positionTbDropdown(panel, trigger)
-      requestAnimationFrame(() => positionTbDropdown(panel, trigger))
-    })
-  }
-
-  function toggleTbDropdownPanel(panel: HTMLElement, trigger: HTMLButtonElement): void {
-    if (openTbDropdown?.panel === panel) {
-      closeTbDropdown()
-      return
-    }
-    openTbDropdownPanel(panel, trigger)
   }
 
   function toggleColorPickerPanel(panel: HTMLElement, swatch: HTMLButtonElement): void {
@@ -524,7 +1082,6 @@ export function mount(root: HTMLElement): void {
       closeColorPickerPanel()
       return
     }
-    closeTbDropdown()
     closeColorPickerPanel()
     panel.hidden = false
     swatch.setAttribute('aria-expanded', 'true')
@@ -590,11 +1147,6 @@ export function mount(root: HTMLElement): void {
     'pointerdown',
     (ev) => {
       const t = ev.target as Node
-      if (openTbDropdown) {
-        if (!openTbDropdown.panel.contains(t) && !openTbDropdown.trigger.contains(t)) {
-          closeTbDropdown()
-        }
-      }
       if (!openColorPicker) return
       if (openColorPicker.panel.contains(t) || openColorPicker.swatch.contains(t)) return
       closeColorPickerPanel()
@@ -604,83 +1156,127 @@ export function mount(root: HTMLElement): void {
 
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape') {
-      closeTbDropdown()
       closeColorPickerPanel()
     }
   })
 
   window.addEventListener('resize', () => {
-    closeTbDropdown()
     closeColorPickerPanel()
   })
   window.addEventListener(
     'scroll',
     () => {
-      closeTbDropdown()
       closeColorPickerPanel()
     },
     true,
   )
-
-  function applyToolbarPinState(): void {
-    toolbarExpanded.hidden = !toolbarPinned
-    toolbarHint.hidden = toolbarPinned
-    btnToolbarPin.setAttribute('aria-pressed', String(toolbarPinned))
-    btnToolbarPin.setAttribute('aria-expanded', String(toolbarPinned))
-    toolbarWrap.classList.toggle('pop-toolbar-pinned', toolbarPinned)
-    pinLabelEl.textContent = toolbarPinned ? 'Unpin toolbar' : 'Pin toolbar'
-    if (!toolbarPinned) {
-      closeTbDropdown()
-      closeColorPickerPanel()
-    }
-  }
-
-  btnToolbarPin.addEventListener('click', () => {
-    toolbarPinned = !toolbarPinned
-    localStorage.setItem(TOOLBAR_PIN_STORAGE_KEY, toolbarPinned ? '1' : '0')
-    applyToolbarPinState()
-  })
-
-  root.querySelectorAll<HTMLElement>('[data-pop-tb-dd]').forEach((wrap) => {
-    const trigger = wrap.querySelector<HTMLButtonElement>('.pop-tb-dd-trigger')
-    const panel = wrap.querySelector<HTMLElement>('.pop-tb-dd-panel')
-    if (!trigger || !panel) return
-    trigger.addEventListener('click', (e) => {
-      e.preventDefault()
-      e.stopPropagation()
-      if (!toolbarPinned) return
-      toggleTbDropdownPanel(panel, trigger)
-    })
-  })
-
-  toolbarExpanded.addEventListener(
-    'click',
-    (e) => {
-      if (!openTbDropdown) return
-      const hit = e.target as HTMLElement
-      if (hit.closest('.pop-tb-dd-trigger')) return
-      if (hit.closest('.pop-color-panel')) return
-      if (hit.closest('.pop-color-swatch')) return
-      if (hit.closest('input[type="range"]')) return
-      if (hit.closest('select')) return
-      if (!openTbDropdown.panel.contains(hit)) return
-      if (hit.closest('button')) {
-        queueMicrotask(() => closeTbDropdown())
-      }
-    },
-    true,
-  )
-
-  applyToolbarPinState()
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null
 
+  /** ~1 screen pixel per world unit, for hairline strokes that match the CSS grid weight. */
+  function getScreenPxPerWorldUnit(): number {
+    const ctm = viewportG.getScreenCTM()
+    if (!ctm) return 1
+    const p0 = svg.createSVGPoint()
+    p0.x = 0
+    p0.y = 0
+    const p1 = svg.createSVGPoint()
+    p1.x = 1
+    p1.y = 0
+    const s0 = p0.matrixTransform(ctm)
+    const s1 = p1.matrixTransform(ctm)
+    return Math.max(Math.hypot(s1.x - s0.x, s1.y - s0.y), 1e-6)
+  }
+
+  /** Scale symmetry + snap guide strokes with zoom so they match the workspace grid (hairline on screen). */
+  function syncGuidePresentation(): void {
+    const px = getScreenPxPerWorldUnit()
+    const hair = 1 / px
+    const snapStroke = Math.max(hair * 1.5, 0.001)
+    const dash = 8 / px
+    const gap = 6 / px
+    const dashStr = `${dash} ${gap}`
+    guidesBack.querySelectorAll('line').forEach((el) => {
+      el.setAttribute('stroke-width', String(hair))
+      el.setAttribute('stroke-dasharray', dashStr)
+      el.removeAttribute('vector-effect')
+    })
+    guidesFront.querySelectorAll('line').forEach((el) => {
+      el.setAttribute('stroke-width', String(snapStroke))
+      el.removeAttribute('stroke-dasharray')
+      el.removeAttribute('vector-effect')
+    })
+  }
+
+  function syncWorkspaceChrome(): void {
+    syncCanvasWorkspaceGrid()
+    syncGuidePresentation()
+  }
+
+  /** One workspace grid: CSS on canvas-wrap, aligned to world space via viewport CTM (pan/zoom/letterbox). */
+  function syncCanvasWorkspaceGrid(): void {
+    const ctm = viewportG.getScreenCTM()
+    if (!ctm) return
+    const worldToScreen = (wx: number, wy: number): { x: number; y: number } => {
+      const pt = svg.createSVGPoint()
+      pt.x = wx
+      pt.y = wy
+      const sp = pt.matrixTransform(ctm)
+      return { x: sp.x, y: sp.y }
+    }
+    const p0 = worldToScreen(0, 0)
+    const px = worldToScreen(GRID_PATTERN_WORLD, 0)
+    const py = worldToScreen(0, GRID_PATTERN_WORLD)
+    const pitchX = Math.hypot(px.x - p0.x, px.y - p0.y)
+    const pitchY = Math.hypot(py.x - p0.x, py.y - p0.y)
+    const pitch = Math.max((pitchX + pitchY) / 2, 0.75)
+
+    const wrap = canvasWrap.getBoundingClientRect()
+    const relX = p0.x - wrap.left
+    const relY = p0.y - wrap.top
+    const mod = (n: number, m: number): number => ((n % m) + m) % m
+    const ox = -mod(relX, pitch)
+    const oy = -mod(relY, pitch)
+
+    canvasWrap.style.setProperty('--pop-grid-pitch', `${pitch}px`)
+    canvasWrap.style.setProperty('--pop-grid-ox', `${ox}px`)
+    canvasWrap.style.setProperty('--pop-grid-oy', `${oy}px`)
+  }
+
   function syncViewportTransform(): void {
     viewportG.setAttribute('transform', `translate(${viewTx} ${viewTy}) scale(${viewScale})`)
+    syncWorkspaceChrome()
   }
 
   function updateZoomPctLabel(): void {
-    elZoomPct.textContent = `${Math.round(viewScale * 100)}%`
+    const t = `${Math.round(viewScale * 100)}%`
+    elZoomPct.textContent = t
+    elZoomPctDock.textContent = t
+  }
+
+  /** Scale and pan so the full world bounds fit inside the visible SVG with padding. */
+  function zoomToFitCanvas(): void {
+    const pad = 40
+    const sb = svg.getBoundingClientRect()
+    const aw = Math.max(64, sb.width - pad)
+    const ah = Math.max(64, sb.height - pad)
+    const ww = Math.max(1, worldW)
+    const wh = Math.max(1, worldH)
+    const ns = clamp(Math.min(aw / ww, ah / wh), MIN_VIEW_SCALE, MAX_VIEW_SCALE)
+    const wc = ww / 2
+    const hc = wh / 2
+    viewScale = ns
+    viewTx = 0
+    viewTy = 0
+    syncViewportTransform()
+    const cx = sb.left + sb.width / 2
+    const cy = sb.top + sb.height / 2
+    const w = clientToSvgCoords(cx, cy)
+    viewTx = viewScale * (w.x - wc)
+    viewTy = viewScale * (w.y - hc)
+    syncViewportTransform()
+    updateZoomPctLabel()
+    schedulePersist()
   }
 
   /** Change scale while keeping the given canvas point (world coords) under the cursor. */
@@ -707,23 +1303,33 @@ export function mount(root: HTMLElement): void {
     }
   }
 
+  function buildDocumentV3(): PopDocumentV3 {
+    return {
+      v: 3,
+      meta: {
+        name: docName,
+        updatedAt: new Date().toISOString(),
+        htmlExportStylesheets: [...htmlExportStylesheets],
+      },
+      tokens,
+      frames: JSON.parse(JSON.stringify(frames)) as PopFrame[],
+      activeFrameId,
+      nodes: nodesToRecord(nodes),
+      layerNames: { ...layerNames },
+      definitions: defsToRecord(definitions),
+      defaultFill,
+      defaultStroke,
+      defaultStrokeWidth,
+      symmetryGuidesOn,
+      viewTx,
+      viewTy,
+      viewScale,
+    }
+  }
+
   function persistToStorage(): void {
     try {
-      const payload: PersistedStateV2 = {
-        v: 2,
-        rootIds: [...rootIds],
-        nodes: nodesToRecord(nodes),
-        layerNames: { ...layerNames },
-        definitions: defsToRecord(definitions),
-        defaultFill,
-        defaultStroke,
-        defaultStrokeWidth,
-        symmetryGuidesOn,
-        viewTx,
-        viewTy,
-        viewScale,
-      }
-      localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(payload))
+      localStorage.setItem(STORAGE_KEY_V3, JSON.stringify(buildDocumentV3()))
     } catch {
       /* quota or private mode */
     }
@@ -776,43 +1382,94 @@ export function mount(root: HTMLElement): void {
     }
   }
 
+  function applyDocumentV3(doc: PopDocumentV3): void {
+    docName = doc.meta.name
+    tokens = doc.tokens ?? {}
+    htmlExportStylesheets =
+      Array.isArray(doc.meta.htmlExportStylesheets) &&
+      doc.meta.htmlExportStylesheets.every((x) => typeof x === 'string')
+        ? [...doc.meta.htmlExportStylesheets]
+        : []
+    frames = JSON.parse(JSON.stringify(doc.frames)) as PopFrame[]
+    activeFrameId = doc.activeFrameId
+    if (!frames.some((f) => f.id === activeFrameId)) activeFrameId = frames[0]!.id
+    nodes = recordToNodes(doc.nodes as Record<string, unknown>)
+    definitions = recordToDefs(doc.definitions as Record<string, unknown>)
+    layerNames = { ...doc.layerNames }
+    defaultFill = doc.defaultFill
+    defaultStroke = doc.defaultStroke
+    defaultStrokeWidth = doc.defaultStrokeWidth
+    symmetryGuidesOn = doc.symmetryGuidesOn
+    fillInput.value = defaultFill
+    strokeInput.value = defaultStroke
+    strokeWInput.value = String(defaultStrokeWidth)
+    guidesCheckbox.checked = symmetryGuidesOn
+    componentEditRoots = null
+    editingComponentId = null
+    applyLoadedView(doc)
+    const keepIds = new Set(nodes.keys())
+    for (const k of Object.keys(layerNames)) {
+      if (!keepIds.has(k)) delete layerNames[k]
+    }
+    recomputeWorldSize()
+    renderTokensPanel()
+    refreshFillStrokeTokenSelects()
+    syncHtmlExportStylesheetsUi()
+  }
+
   try {
-    const rawV2 = localStorage.getItem(STORAGE_KEY_V2)
-    if (rawV2) {
-      const data = JSON.parse(rawV2) as Partial<PersistedStateV2>
-      if (data.v === 2 && data.nodes && typeof data.nodes === 'object' && Array.isArray(data.rootIds)) {
-        nodes = recordToNodes(data.nodes as Record<string, SceneNode>)
-        rootIds = data.rootIds.filter((id) => nodes.has(id))
-        if (data.definitions && typeof data.definitions === 'object') {
-          definitions = recordToDefs(data.definitions as Record<string, ComponentDefinition>)
-        }
-        if (data.layerNames && typeof data.layerNames === 'object') {
-          layerNames = { ...data.layerNames }
-        }
-        editingComponentId = null
-        const keepIds = new Set(nodes.keys())
-        for (const k of Object.keys(layerNames)) {
-          if (!keepIds.has(k)) delete layerNames[k]
-        }
-        applyLoadedView(data)
-      }
+    const rawV3 = localStorage.getItem(STORAGE_KEY_V3)
+    if (rawV3) {
+      const parsed = JSON.parse(rawV3) as unknown
+      const doc = loadDocumentV3(parsed)
+      if (doc) applyDocumentV3(doc)
     } else {
-      const rawV1 = localStorage.getItem(STORAGE_KEY_V1)
-      if (rawV1) {
-        const data = JSON.parse(rawV1) as Partial<PersistedStateV1>
-        if (data.v === 1 && Array.isArray(data.items)) {
-          const next = data.items.filter(isValidCanvasItem)
-          const mig = migrateV1ToScene(next)
-          rootIds = mig.rootIds
-          nodes = mig.nodes
-          if (data.layerNames && typeof data.layerNames === 'object') {
-            layerNames = { ...data.layerNames }
+      const rawV2 = localStorage.getItem(STORAGE_KEY_V2)
+      if (rawV2) {
+        const data = JSON.parse(rawV2) as Partial<PersistedStateV2>
+        if (data.v === 2 && data.nodes && typeof data.nodes === 'object' && Array.isArray(data.rootIds)) {
+          const v2: PersistedStateV2 = {
+            v: 2,
+            rootIds: data.rootIds,
+            nodes: data.nodes as PersistedStateV2['nodes'],
+            layerNames: (data.layerNames as PersistedStateV2['layerNames']) ?? {},
+            definitions: (data.definitions as PersistedStateV2['definitions']) ?? {},
+            defaultFill: data.defaultFill ?? '#3b82f6',
+            defaultStroke: data.defaultStroke ?? '#1e3a5f',
+            defaultStrokeWidth: data.defaultStrokeWidth ?? 2,
+            symmetryGuidesOn: data.symmetryGuidesOn ?? true,
+            viewTx: data.viewTx,
+            viewTy: data.viewTy,
+            viewScale: data.viewScale,
           }
-          const ids = new Set(nodes.keys())
-          for (const k of Object.keys(layerNames)) {
-            if (!ids.has(k)) delete layerNames[k]
+          applyDocumentV3(migrateV2ToV3(v2))
+          persistToStorage()
+        }
+      } else {
+        const rawV1 = localStorage.getItem(STORAGE_KEY_V1)
+        if (rawV1) {
+          const data = JSON.parse(rawV1) as Partial<PersistedStateV1>
+          if (data.v === 1 && Array.isArray(data.items)) {
+            const next = data.items.filter(isValidCanvasItem)
+            const mig = migrateV1ToScene(next)
+            const v2: PersistedStateV2 = {
+              v: 2,
+              rootIds: mig.rootIds,
+              nodes: nodesToRecord(mig.nodes),
+              layerNames:
+                data.layerNames && typeof data.layerNames === 'object' ? { ...data.layerNames } : {},
+              definitions: {},
+              defaultFill: data.defaultFill ?? '#3b82f6',
+              defaultStroke: data.defaultStroke ?? '#1e3a5f',
+              defaultStrokeWidth: data.defaultStrokeWidth ?? 2,
+              symmetryGuidesOn: data.symmetryGuidesOn ?? true,
+              viewTx: data.viewTx,
+              viewTy: data.viewTy,
+              viewScale: data.viewScale,
+            }
+            applyDocumentV3(migrateV2ToV3(v2))
+            persistToStorage()
           }
-          applyLoadedView(data)
         }
       }
     }
@@ -821,6 +1478,9 @@ export function mount(root: HTMLElement): void {
   }
 
   updateBothSwatches()
+  renderTokensPanel()
+  refreshFillStrokeTokenSelects()
+  syncHtmlExportStylesheetsUi()
 
   let hintTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -844,6 +1504,110 @@ export function mount(root: HTMLElement): void {
   function readNum(el: HTMLInputElement): number | null {
     const v = parseFloat(el.value)
     return Number.isFinite(v) ? v : null
+  }
+
+  function clampRectCornerRadius(it: SceneNode): void {
+    if (it.type !== 'rect') return
+    const maxR = Math.min(it.width, it.height) / 2
+    it.rx = Math.max(0, Math.min(it.rx, maxR))
+  }
+
+  function syncStyleFromSelection(): void {
+    const n = selected.size
+    const sel = [...selected]
+
+    const anyFillTarget =
+      n === 0 || sel.some((id) => ['rect', 'ellipse', 'text'].includes(getNode(id)?.type ?? ''))
+    const anyStrokeTarget =
+      n === 0 || sel.some((id) => ['rect', 'ellipse'].includes(getNode(id)?.type ?? ''))
+    const anyOpacityTarget =
+      n === 0 ||
+      sel.some((id) => ['rect', 'ellipse', 'text', 'image'].includes(getNode(id)?.type ?? ''))
+    const anyRect = n === 0 || sel.some((id) => getNode(id)?.type === 'rect')
+
+    fillInput.disabled = n > 0 && !anyFillTarget
+    fillSwatch.disabled = fillInput.disabled
+    fillStyleBlock.style.opacity = n > 0 && !anyFillTarget ? '0.45' : ''
+    fillTokenSelect.disabled = fillInput.disabled
+
+    strokeStyleBlocks.hidden = n > 0 && !anyStrokeTarget
+    strokeInput.disabled = n > 0 && !anyStrokeTarget
+    strokeWInput.disabled = n > 0 && !anyStrokeTarget
+    strokeSwatch.disabled = strokeInput.disabled
+    strokeTokenSelect.disabled = strokeInput.disabled
+    strokeTokenWrap.style.opacity = strokeInput.disabled ? '0.45' : ''
+
+    opacityInput.disabled = n > 0 && !anyOpacityTarget
+    rxWrap.style.display = anyRect ? '' : 'none'
+    rxInput.disabled = n > 0 && !anyRect
+
+    if (n === 0) {
+      fillInput.value = defaultFill
+      strokeInput.value = defaultStroke
+      strokeWInput.value = String(defaultStrokeWidth)
+      opacityInput.value = String(Math.round(defaultOpacity * 100))
+      rxInput.value = String(Math.round(defaultRx))
+      updateBothSwatches()
+      refreshFillStrokeTokenSelects()
+      return
+    }
+
+    const fillIds = sel.filter((id) => ['rect', 'ellipse', 'text'].includes(getNode(id)?.type ?? ''))
+    if (fillIds.length > 0) {
+      const hexes = fillIds.map((id) => {
+        const node = getNode(id)
+        if (!node || (node.type !== 'rect' && node.type !== 'ellipse' && node.type !== 'text')) {
+          return '#000000'
+        }
+        return normalizeHex6(resolvedFill(node, tokens))
+      })
+      const first = hexes[0]!
+      fillInput.value = first
+      fillSwatch.title = hexes.every((h) => h === first) ? `Fill: ${first}` : `Mixed fills (${first} shown)`
+      updateFillSwatch()
+    }
+
+    const strokeIds = sel.filter((id) => ['rect', 'ellipse'].includes(getNode(id)?.type ?? ''))
+    if (!strokeStyleBlocks.hidden && strokeIds.length > 0) {
+      const strokes = strokeIds.map((id) => {
+        const node = getNode(id)
+        if (!node || (node.type !== 'rect' && node.type !== 'ellipse')) return '#000000'
+        return normalizeHex6(resolvedStroke(node, tokens))
+      })
+      const sw = strokeIds.map((id) => (getNode(id) as { strokeWidth: number }).strokeWidth)
+      const s0 = strokes[0]!
+      strokeInput.value = s0
+      strokeSwatch.title = strokes.every((s) => s === s0) ? `Stroke: ${s0}` : `Mixed strokes (${s0} shown)`
+      updateStrokeSwatch()
+      if (sw.every((w) => w === sw[0])) strokeWInput.value = String(sw[0])
+      else strokeWInput.value = String(sw[0])
+    }
+
+    const opLeaves = sel
+      .map((id) => getNode(id))
+      .filter(
+        (it): it is SceneLeaf =>
+          !!it && (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text' || it.type === 'image'),
+      )
+    if (opLeaves.length > 0) {
+      const ops = opLeaves.map((it) => it.opacity)
+      const o0 = ops[0]!
+      opacityInput.value = String(Math.round(o0 * 100))
+      if (!ops.every((o) => o === o0)) opacityInput.title = 'Mixed opacity (first shown)'
+      else opacityInput.title = 'Opacity'
+    }
+
+    const rects = sel
+      .map((id) => getNode(id))
+      .filter((it): it is SceneNode & { type: 'rect' } => it?.type === 'rect')
+    if (rects.length > 0) {
+      const rxs = rects.map((r) => r.rx)
+      const r0 = rxs[0]!
+      rxInput.value = String(Math.round(r0))
+      if (!rxs.every((r) => r === r0)) rxInput.title = 'Mixed corner radius (first shown)'
+      else rxInput.title = 'Corner radius'
+    }
+    refreshFillStrokeTokenSelects()
   }
 
   function syncPropsFromSelection(): void {
@@ -929,6 +1693,10 @@ export function mount(root: HTMLElement): void {
         c.fontSize = clamp(Math.round(c.fontSize * Math.min(sx, sy)), 4, 400)
         c.height = c.fontSize
       }
+      if (c.type === 'rect') {
+        const factor = Math.min(sx, sy)
+        c.rx = stripNum(Math.min(c.rx * factor, c.width / 2, c.height / 2))
+      }
       if (c.type === 'group') {
         scaleGroupChildren(cid, sx, sy)
       }
@@ -974,6 +1742,7 @@ export function mount(root: HTMLElement): void {
         const ph = readNum(inpH)
         if (pw !== null) it.width = Math.max(1, pw)
         if (ph !== null) it.height = Math.max(1, ph)
+        if (it.type === 'rect') clampRectCornerRadius(it)
       }
     } else {
       const pw = readNum(inpW)
@@ -988,6 +1757,7 @@ export function mount(root: HTMLElement): void {
             it.width = nw
           } else if (it && it.type !== 'text') {
             it.width = Math.max(1, pw)
+            if (it.type === 'rect') clampRectCornerRadius(it)
           }
         }
       }
@@ -1001,6 +1771,7 @@ export function mount(root: HTMLElement): void {
             it.height = nh
           } else if (it && it.type !== 'text') {
             it.height = Math.max(1, ph)
+            if (it.type === 'rect') clampRectCornerRadius(it)
           }
         }
       }
@@ -1022,15 +1793,18 @@ export function mount(root: HTMLElement): void {
       l.setAttribute('y1', String(y1))
       l.setAttribute('x2', String(x2))
       l.setAttribute('y2', String(y2))
-      l.setAttribute('stroke', '#7c9cff')
+      l.setAttribute('stroke', '#c4b5fd')
       l.setAttribute('stroke-opacity', '0.35')
       l.setAttribute('stroke-width', '1')
-      l.setAttribute('stroke-dasharray', '8 6')
-      l.setAttribute('vector-effect', 'non-scaling-stroke')
       return l
     }
-    guidesBack.appendChild(mkLine(VIEW_W / 2, 0, VIEW_W / 2, VIEW_H))
-    guidesBack.appendChild(mkLine(0, VIEW_H / 2, VIEW_W, VIEW_H / 2))
+    const b = snapBoundsForFrame()
+    const cx = b.x + b.width / 2
+    const cy = b.y + b.height / 2
+    // Span the full world so guides stay consistent when panning/zooming (same as snap preview lines).
+    guidesBack.appendChild(mkLine(cx, 0, cx, worldH))
+    guidesBack.appendChild(mkLine(0, cy, worldW, cy))
+    syncGuidePresentation()
   }
 
   function renderSnapGuides(verticalX: number | null, horizontalY: number | null): void {
@@ -1040,23 +1814,22 @@ export function mount(root: HTMLElement): void {
       l.setAttribute('x1', String(verticalX))
       l.setAttribute('x2', String(verticalX))
       l.setAttribute('y1', '0')
-      l.setAttribute('y2', String(VIEW_H))
+      l.setAttribute('y2', String(worldH))
       l.setAttribute('stroke', '#c4d0ff')
-      l.setAttribute('stroke-width', '1.5')
-      l.setAttribute('vector-effect', 'non-scaling-stroke')
+      l.setAttribute('stroke-width', '1')
       guidesFront.appendChild(l)
     }
     if (horizontalY !== null) {
       const l = document.createElementNS('http://www.w3.org/2000/svg', 'line')
       l.setAttribute('x1', '0')
-      l.setAttribute('x2', String(VIEW_W))
+      l.setAttribute('x2', String(worldW))
       l.setAttribute('y1', String(horizontalY))
       l.setAttribute('y2', String(horizontalY))
       l.setAttribute('stroke', '#c4d0ff')
-      l.setAttribute('stroke-width', '1.5')
-      l.setAttribute('vector-effect', 'non-scaling-stroke')
+      l.setAttribute('stroke-width', '1')
       guidesFront.appendChild(l)
     }
+    syncGuidePresentation()
   }
 
   for (const el of [inpX, inpY, inpW, inpH, inpFs]) {
@@ -1066,9 +1839,21 @@ export function mount(root: HTMLElement): void {
     el.addEventListener('blur', () => {
       propsPanelFocused = false
       syncPropsFromSelection()
+      if (!stylePanelFocused) syncStyleFromSelection()
     })
     el.addEventListener('input', () => applyTransformFromInputs())
   }
+
+  styleSection.addEventListener('focusin', () => {
+    stylePanelFocused = true
+  })
+  styleSection.addEventListener('focusout', (e) => {
+    const rt = e.relatedTarget as Node | null
+    if (rt && styleSection.contains(rt)) return
+    if (rt && (fillPanel.contains(rt) || strokePanel.contains(rt))) return
+    stylePanelFocused = false
+    syncStyleFromSelection()
+  })
 
   guidesCheckbox.addEventListener('change', () => {
     symmetryGuidesOn = guidesCheckbox.checked
@@ -1086,6 +1871,8 @@ export function mount(root: HTMLElement): void {
     defaultFill = fillInput.value
     defaultStroke = strokeInput.value
     defaultStrokeWidth = Number(strokeWInput.value)
+    defaultOpacity = clamp(Number(opacityInput.value) / 100, 0, 1)
+    defaultRx = Math.max(0, Number(rxInput.value))
   }
 
   function setTool(next: Tool): void {
@@ -1101,8 +1888,8 @@ export function mount(root: HTMLElement): void {
       fileInput.click()
       setTool('select')
     }
-    closeTbDropdown()
     renderHandles()
+    applyLeftInspectorVisibility()
   }
 
   function getNode(id: string): SceneNode | undefined {
@@ -1111,7 +1898,9 @@ export function mount(root: HTMLElement): void {
 
   function removeChildRef(parentId: string | null, childId: string): void {
     if (parentId === null) {
-      rootIds = rootIds.filter((id) => id !== childId)
+      const r = roots()
+      const j = r.indexOf(childId)
+      if (j >= 0) r.splice(j, 1)
     } else {
       const p = nodes.get(parentId)
       if (p?.type === 'group') {
@@ -1126,8 +1915,9 @@ export function mount(root: HTMLElement): void {
     removeChildRef(child.parentId, childId)
     child.parentId = parentId
     if (parentId === null) {
-      const i = clamp(index, 0, rootIds.length)
-      rootIds.splice(i, 0, childId)
+      const r = roots()
+      const i = clamp(index, 0, r.length)
+      r.splice(i, 0, childId)
     } else {
       const p = nodes.get(parentId)
       if (p?.type === 'group') {
@@ -1179,6 +1969,58 @@ export function mount(root: HTMLElement): void {
     return chain.reverse()
   }
 
+  function setLayersAsideTab(tab: 'layers' | 'parent'): void {
+    layersAsideTab = tab
+    const layersOn = tab === 'layers'
+    tabLayersBtn.classList.toggle('pop-layer-tab-active', layersOn)
+    tabLayersBtn.setAttribute('aria-selected', String(layersOn))
+    tabParentBtn.classList.toggle('pop-layer-tab-active', !layersOn)
+    tabParentBtn.setAttribute('aria-selected', String(!layersOn))
+    layersTreePanel.hidden = !layersOn
+    layersParentPanel.hidden = layersOn
+    layerAsideHint.textContent = layersOn
+      ? 'Drag to reorder or nest · ⌘/Ctrl+click multi-select'
+      : 'Top → bottom is root to selection. Click a row to select that layer.'
+    if (!layersOn) renderParentPanel()
+  }
+
+  function renderParentPanel(): void {
+    parentChainEl.replaceChildren()
+    const prim = primarySelectionId()
+    if (!prim) {
+      parentPanelDesc.textContent = 'Select a layer on the canvas or in the Layers list.'
+      btnSelectSiblings.disabled = true
+      return
+    }
+    btnSelectSiblings.disabled = false
+    const chain = ancestorChainOrdered(prim)
+    parentPanelDesc.textContent =
+      chain.length > 1
+        ? 'Ancestors above, selection last. Click any row to select that layer.'
+        : 'Nothing is nested above this layer (it is a direct child of the frame or root).'
+    for (const cid of chain) {
+      const item = getNode(cid)
+      if (!item) continue
+      const li = document.createElement('li')
+      li.className = 'pop-parent-crumb'
+      if (selected.has(cid)) li.classList.add('pop-parent-crumb-selected')
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'pop-parent-crumb-btn'
+      btn.textContent = layerNames[cid] ?? itemLabel(item, definitions)
+      btn.addEventListener('click', () => {
+        selected = new Set([cid])
+        updateSelectionUi()
+        syncPropsFromSelection()
+        syncStyleFromSelection()
+        renderHandles()
+        renderParentPanel()
+      })
+      li.appendChild(btn)
+      parentChainEl.appendChild(li)
+    }
+  }
+
   function selectedDeletionRoots(): string[] {
     const sel = [...selected]
     return sel.filter(
@@ -1198,6 +2040,136 @@ export function mount(root: HTMLElement): void {
         selected.delete(x)
       }
     }
+  }
+
+  function buildCopyPayload(): PopClipboardPayload | null {
+    const roots = selectedDeletionRoots()
+    if (roots.length === 0) return null
+    const idSet = new Set<string>()
+    for (const r of roots) {
+      for (const id of collectSubtreeIds(nodes, r)) idSet.add(id)
+    }
+    const nodesOut: Record<string, SceneNode> = {}
+    for (const id of idSet) {
+      const raw = nodes.get(id)
+      if (!raw) continue
+      const copy = JSON.parse(JSON.stringify(raw)) as SceneNode
+      const p = raw.parentId
+      if (p !== null && !idSet.has(p)) {
+        const wf = worldFrame(nodes, definitions, id)
+        if (!wf) continue
+        copy.parentId = null
+        copy.x = wf.x
+        copy.y = wf.y
+        copy.width = wf.width
+        copy.height = wf.height
+        if (copy.type === 'text') {
+          copy.height = wf.height
+        }
+      }
+      nodesOut[id] = copy
+    }
+    const layerNamesOut: Record<string, string> = {}
+    for (const id of idSet) {
+      const ln = layerNames[id]
+      if (ln) layerNamesOut[id] = ln
+    }
+    return {
+      popClipboard: POP_CLIPBOARD_VERSION,
+      roots: [...roots],
+      nodes: nodesOut,
+      layerNames: Object.keys(layerNamesOut).length > 0 ? layerNamesOut : undefined,
+    }
+  }
+
+  async function copySelectionToSystemClipboard(): Promise<void> {
+    const payload = buildCopyPayload()
+    if (!payload) return
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload))
+    } catch {
+      /* clipboard may be unavailable */
+    }
+  }
+
+  function pastePayloadIntoDocument(payload: PopClipboardPayload): void {
+    const oldIds = Object.keys(payload.nodes)
+    if (oldIds.length === 0 || payload.roots.length === 0) return
+    const idMap = new Map<string, string>()
+    for (const oid of oldIds) {
+      idMap.set(oid, newId())
+    }
+    for (const oid of oldIds) {
+      const raw = payload.nodes[oid]
+      if (!raw) continue
+      const nid = idMap.get(oid)!
+      const copy = JSON.parse(JSON.stringify(raw)) as SceneNode
+      copy.id = nid
+      const p = raw.parentId
+      copy.parentId = p === null ? null : idMap.get(p)!
+      if (copy.type === 'group' && raw.type === 'group') {
+        copy.childIds = raw.childIds.map((c) => idMap.get(c)!)
+      }
+      nodes.set(nid, copy)
+    }
+
+    const tops = selectedDeletionRoots()
+    let pasteParent: string | null
+    let insertAt: number
+    if (tops.length === 0) {
+      pasteParent = null
+      insertAt = roots().length
+    } else {
+      const first = nodes.get(tops[0]!)
+      pasteParent = first?.parentId ?? null
+      const sib = siblingListForParent(pasteParent)
+      const indices = tops.map((id) => sib.indexOf(id)).filter((i) => i >= 0)
+      insertAt = indices.length > 0 ? Math.max(...indices) + 1 : sib.length
+    }
+
+    const newSelection: string[] = []
+    let slot = insertAt
+    for (const oldRoot of payload.roots) {
+      const newId = idMap.get(oldRoot)
+      if (!newId) continue
+      const n = nodes.get(newId)
+      if (!n) continue
+
+      removeChildRef(n.parentId, newId)
+
+      const wf = worldFrame(nodes, definitions, newId)
+      if (!wf) {
+        insertChildRef(pasteParent, newId, slot++)
+        newSelection.push(newId)
+        continue
+      }
+      const ox = worldSpaceOriginForParent(pasteParent)
+      n.x = wf.x + PASTE_OFFSET_WORLD - ox.x
+      n.y = wf.y + PASTE_OFFSET_WORLD - ox.y
+
+      insertChildRef(pasteParent, newId, slot++)
+      newSelection.push(newId)
+    }
+
+    for (const [oid, nid] of idMap) {
+      const nm = payload.layerNames?.[oid]
+      if (nm) layerNames[nid] = nm
+    }
+
+    selected = new Set(newSelection)
+    commit()
+  }
+
+  async function pasteFromSystemClipboard(): Promise<void> {
+    let raw: string
+    try {
+      raw = await navigator.clipboard.readText()
+    } catch {
+      return
+    }
+    const payload = parsePopClipboard(raw)
+    if (!payload) return
+    pastePayloadIntoDocument(payload)
   }
 
   function groupSelection(): void {
@@ -1263,8 +2235,9 @@ export function mount(root: HTMLElement): void {
       c.y += gy
     }
     if (parentId === null) {
-      rootIds.splice(insertIdx, 1)
-      rootIds.splice(insertIdx, 0, ...kids)
+      const r = roots()
+      r.splice(insertIdx, 1)
+      r.splice(insertIdx, 0, ...kids)
     } else {
       const p = nodes.get(parentId)
       if (p?.type === 'group') {
@@ -1391,7 +2364,7 @@ export function mount(root: HTMLElement): void {
       width: wf.width,
       height: wf.height,
     })
-    insertChildRef(parentId, instId, insertIdx >= 0 ? insertIdx : rootIds.length)
+    insertChildRef(parentId, instId, insertIdx >= 0 ? insertIdx : roots().length)
     selected = new Set([instId])
     commit()
   }
@@ -1406,6 +2379,10 @@ export function mount(root: HTMLElement): void {
     if (n.type === 'text') {
       n.fontSize = clamp(Math.round(n.fontSize * Math.min(sx, sy)), 4, 400)
       n.height = n.fontSize
+    }
+    if (n.type === 'rect') {
+      const factor = Math.min(sx, sy)
+      n.rx = stripNum(Math.min(n.rx * factor, n.width / 2, n.height / 2))
     }
     if (n.type === 'group') {
       for (const cid of n.childIds) {
@@ -1463,7 +2440,7 @@ export function mount(root: HTMLElement): void {
     } else {
       scaleSceneSubtree(newRoot, sx, sy)
     }
-    insertChildRef(parentId, newRoot, insertIdx >= 0 ? insertIdx : rootIds.length)
+    insertChildRef(parentId, newRoot, insertIdx >= 0 ? insertIdx : roots().length)
     selected = new Set([newRoot])
     commit()
   }
@@ -1471,20 +2448,21 @@ export function mount(root: HTMLElement): void {
   function insertComponentInstance(compId: string): void {
     const def = definitions.get(compId)
     if (!def) return
-    const w = Math.min(def.intrinsicW, VIEW_W * 0.5)
-    const h = Math.min(def.intrinsicH, VIEW_H * 0.5)
+    const fr = getActiveFrame()
+    const w = Math.min(def.intrinsicW, fr.width * 0.5)
+    const h = Math.min(def.intrinsicH, fr.height * 0.5)
     const nid = newId()
     nodes.set(nid, {
       id: nid,
       parentId: null,
       type: 'instance',
       componentId: compId,
-      x: (VIEW_W - w) / 2,
-      y: (VIEW_H - h) / 2,
+      x: fr.x + (fr.width - w) / 2,
+      y: fr.y + (fr.height - h) / 2,
       width: w,
       height: h,
     })
-    rootIds.push(nid)
+    roots().push(nid)
     selected = new Set([nid])
     commit()
   }
@@ -1570,7 +2548,7 @@ export function mount(root: HTMLElement): void {
     if (!n) return ''
     if (n.type === 'group') {
       const inner = n.childIds
-        .map((cid) => serializeSceneSubtreeSvg(nodes, definitions, cid, `${ind}  `))
+        .map((cid) => serializeSceneSubtreeSvg(nodes, definitions, cid, `${ind}  `, tokens))
         .join('\n')
       return `${ind}<g>\n${inner}\n${ind}</g>`
     }
@@ -1579,16 +2557,19 @@ export function mount(root: HTMLElement): void {
       if (!def) return ''
       const sx = n.width / Math.max(1e-6, def.intrinsicW)
       const sy = n.height / Math.max(1e-6, def.intrinsicH)
-      const inner = serializeDefSubtreeSvg(def, def.rootId, `${ind}  `)
+      const inner = serializeDefSubtreeSvg(def, def.rootId, `${ind}  `, tokens)
       return `${ind}<g transform="scale(${sx} ${sy})">\n${inner}\n${ind}</g>`
     }
-    return `${ind}${buildSvgFragmentLeafLocal(n)}`
+    return `${ind}${buildSvgFragmentLeafLocal(n, tokens)}`
   }
 
   function hitTestWorld(wx: number, wy: number): string | null {
-    for (let ri = rootIds.length - 1; ri >= 0; ri--) {
-      const h = hitNode(wx, wy, rootIds[ri]!, nodes)
-      if (h) return h
+    for (let fi = frames.length - 1; fi >= 0; fi--) {
+      const fr = frames[fi]!.rootIds
+      for (let ri = fr.length - 1; ri >= 0; ri--) {
+        const h = hitNode(wx, wy, fr[ri]!, nodes)
+        if (h) return h
+      }
     }
     return null
   }
@@ -1624,30 +2605,17 @@ export function mount(root: HTMLElement): void {
     btnInsertInst.disabled = definitions.size === 0 || selCompPick.value === ''
   }
 
-  function updateComponentBanner(): void {
-    if (editingComponentId) {
-      const d = definitions.get(editingComponentId)
-      compBanner.hidden = false
-      compBannerText.textContent = d
-        ? `Editing main component: ${d.name}`
-        : 'Editing component'
-    } else {
-      compBanner.hidden = true
-    }
-  }
-
   function enterComponentEdit(compId: string): void {
     const d = definitions.get(compId)
     if (!d) return
-    closeTbDropdown()
     closeColorPickerPanel()
     mainNodesBackup = new Map(nodes)
-    mainRootIdsBackup = [...rootIds]
-    nodes = recordToNodes({ ...d.nodes } as Record<string, SceneNode>)
-    rootIds = [d.rootId]
+    mainRootIdsBackup = [...roots()]
+    nodes = recordToNodes({ ...d.nodes } as Record<string, unknown>)
+    componentEditRoots = [d.rootId]
     editingComponentId = compId
     selected.clear()
-    updateComponentBanner()
+    btnCompDone.hidden = false
     commit()
   }
 
@@ -1656,7 +2624,7 @@ export function mount(root: HTMLElement): void {
       editingComponentId = null
       mainNodesBackup = null
       mainRootIdsBackup = null
-      updateComponentBanner()
+      btnCompDone.hidden = true
       return
     }
     const compId = editingComponentId
@@ -1668,11 +2636,13 @@ export function mount(root: HTMLElement): void {
       }
     }
     nodes = mainNodesBackup
-    rootIds = mainRootIdsBackup
-    mainNodesBackup = null
+    const af = getActiveFrame()
+    af.rootIds.splice(0, af.rootIds.length, ...(mainRootIdsBackup ?? []))
     mainRootIdsBackup = null
+    componentEditRoots = null
+    mainNodesBackup = null
     editingComponentId = null
-    updateComponentBanner()
+    btnCompDone.hidden = true
     commit()
   }
 
@@ -1692,6 +2662,8 @@ export function mount(root: HTMLElement): void {
 
   function updateSelectionUi(): void {
     btnDelete.disabled = selected.size === 0
+    btnBringFront.disabled = selected.size === 0
+    btnSendBack.disabled = selected.size === 0
     updateHierarchyButtons()
     layerList.querySelectorAll<HTMLLIElement>('.pop-layer').forEach((li) => {
       const id = li.dataset.id
@@ -1707,6 +2679,7 @@ export function mount(root: HTMLElement): void {
       g.classList.toggle('pop-item-selected', canvasHighlight)
     })
     if (layersAsideTab === 'parent') renderParentPanel()
+    applyLeftInspectorVisibility()
   }
 
   function pruneLayerNames(): void {
@@ -1721,9 +2694,76 @@ export function mount(root: HTMLElement): void {
   let layerDropKind: 'before' | 'into' | null = null
 
   function siblingListForParent(parentId: string | null): string[] {
-    if (parentId === null) return rootIds
+    if (parentId === null) return roots()
     const p = nodes.get(parentId)
     return p?.type === 'group' ? p.childIds : []
+  }
+
+  /** Mutable sibling order for paint order (first = back, last = front). */
+  function getMutableSiblingList(nodeId: string): string[] | null {
+    const n = nodes.get(nodeId)
+    if (!n) return null
+    if (n.parentId !== null) {
+      const p = nodes.get(n.parentId)
+      return p?.type === 'group' ? p.childIds : null
+    }
+    if (componentEditRoots !== null) {
+      return componentEditRoots.includes(nodeId) ? componentEditRoots : null
+    }
+    for (const f of frames) {
+      if (f.rootIds.includes(nodeId)) return f.rootIds
+    }
+    return null
+  }
+
+  /** Groups roots that share the same sibling list (frame roots, component roots, or group children). */
+  function siblingGroupKey(id: string): string | null {
+    const n = nodes.get(id)
+    if (!n) return null
+    if (n.parentId !== null) return `g:${n.parentId}`
+    if (componentEditRoots !== null) {
+      return componentEditRoots.includes(id) ? 'comp' : null
+    }
+    for (const f of frames) {
+      if (f.rootIds.includes(id)) return `f:${f.id}`
+    }
+    return null
+  }
+
+  function reorderSelectedInStack(mode: 'front' | 'back'): void {
+    const tops = selectedDeletionRoots()
+    if (tops.length === 0) return
+    const byKey = new Map<string, string[]>()
+    for (const id of tops) {
+      const k = siblingGroupKey(id)
+      if (!k) continue
+      const arr = byKey.get(k) ?? []
+      arr.push(id)
+      byKey.set(k, arr)
+    }
+    if (byKey.size === 0) return
+    for (const ids of byKey.values()) {
+      const sample = ids[0]!
+      const list = getMutableSiblingList(sample)
+      if (!list) continue
+      const idSet = new Set(ids)
+      const sorted = [...ids].sort((a, b) => list.indexOf(a) - list.indexOf(b))
+      const rest = list.filter((x) => !idSet.has(x))
+      if (mode === 'front') {
+        list.splice(0, list.length, ...rest, ...sorted)
+      } else {
+        list.splice(0, list.length, ...sorted, ...rest)
+      }
+    }
+    commit()
+  }
+
+  function bringSelectionToFront(): void {
+    reorderSelectedInStack('front')
+  }
+
+  function sendSelectionToBack(): void {
+    reorderSelectedInStack('back')
   }
 
   /** Wrap a single leaf in a new group at the same place in the tree (for nest-into). */
@@ -1877,6 +2917,7 @@ export function mount(root: HTMLElement): void {
         selected = new Set([id])
         updateSelectionUi()
         syncPropsFromSelection()
+        syncStyleFromSelection()
         renderHandles()
       })
       input.addEventListener('input', () => {
@@ -1957,6 +2998,7 @@ export function mount(root: HTMLElement): void {
         }
         updateSelectionUi()
         syncPropsFromSelection()
+        syncStyleFromSelection()
         renderHandles()
       })
 
@@ -2032,7 +3074,7 @@ export function mount(root: HTMLElement): void {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
     g.setAttribute('transform', `translate(${n.x} ${n.y})`)
     const frag = document.createElementNS('http://www.w3.org/2000/svg', 'g')
-    frag.innerHTML = buildSvgFragmentLeafLocal(n)
+    frag.innerHTML = buildSvgFragmentLeafLocal(n, tokens)
     while (frag.firstChild) g.appendChild(frag.firstChild)
     parentG.appendChild(g)
   }
@@ -2070,15 +3112,17 @@ export function mount(root: HTMLElement): void {
     g.dataset.id = item.id
     g.setAttribute('transform', `translate(${item.x} ${item.y})`)
     const frag = document.createElementNS('http://www.w3.org/2000/svg', 'g')
-    frag.innerHTML = buildSvgFragmentLeafLocal(item)
+    frag.innerHTML = buildSvgFragmentLeafLocal(item, tokens)
     while (frag.firstChild) g.appendChild(frag.firstChild)
     parentG.appendChild(g)
   }
 
   function renderItems(): void {
     itemsG.replaceChildren()
-    for (const rid of rootIds) {
-      renderSceneNode(rid, itemsG)
+    for (const frame of frames) {
+      for (const rid of frame.rootIds) {
+        renderSceneNode(rid, itemsG)
+      }
     }
     updateSelectionUi()
   }
@@ -2091,6 +3135,26 @@ export function mount(root: HTMLElement): void {
     let ox = 0
     let oy = 0
     let cur: string | null = n.parentId
+    const chain: SceneNode[] = []
+    while (cur) {
+      const node = nodes.get(cur)
+      if (!node) break
+      chain.unshift(node)
+      cur = node.parentId
+    }
+    for (const node of chain) {
+      ox += node.x
+      oy += node.y
+    }
+    return { x: ox, y: oy }
+  }
+
+  /** World-space position of the origin of `parentId`'s local coordinate system (direct children use this offset). */
+  function worldSpaceOriginForParent(parentId: string | null): { x: number; y: number } {
+    if (parentId === null) return { x: 0, y: 0 }
+    let ox = 0
+    let oy = 0
+    let cur: string | null = parentId
     const chain: SceneNode[] = []
     while (cur) {
       const node = nodes.get(cur)
@@ -2139,8 +3203,8 @@ export function mount(root: HTMLElement): void {
       hr.setAttribute('y', String(py - HANDLE_HALF))
       hr.setAttribute('width', String(HANDLE_HALF * 2))
       hr.setAttribute('height', String(HANDLE_HALF * 2))
-      hr.setAttribute('fill', '#1a1e28')
-      hr.setAttribute('stroke', '#7c9cff')
+      hr.setAttribute('fill', '#100c18')
+      hr.setAttribute('stroke', '#a78bfa')
       hr.setAttribute('stroke-width', '1')
       hr.setAttribute('data-pop-handle', hid)
       hr.setAttribute('data-item-id', id)
@@ -2160,15 +3224,190 @@ export function mount(root: HTMLElement): void {
     addHandle('w', x, y + h / 2)
   }
 
+  function syncTypographyPanel(): void {
+    const n = selected.size
+    const one = n === 1 ? getNode([...selected][0]!) : undefined
+    const isText = one?.type === 'text'
+    typographyProps.hidden = !isText
+    if (!isText || !one || one.type !== 'text') return
+    inpFontFamily.value = one.fontFamily
+    inpFontWeight.value = String(one.fontWeight)
+    inpLetterSpacing.value = String(one.letterSpacing)
+    inpLineHeight.value = String(one.lineHeight)
+  }
+
+  function syncGroupLayoutPanel(): void {
+    const n = selected.size
+    const one = n === 1 ? getNode([...selected][0]!) : undefined
+    const isGroup = one?.type === 'group'
+    groupLayoutProps.hidden = !isGroup
+    if (!isGroup || !one || one.type !== 'group') return
+    const layout = one.layout
+    if (!layout || layout.type === 'none') {
+      selGroupLayout.value = 'none'
+      inpGroupGap.value = '8'
+      inpGroupPad.value = '8'
+    } else if (layout.type === 'stack') {
+      selGroupLayout.value = layout.direction === 'horizontal' ? 'stack-h' : 'stack-v'
+      inpGroupGap.value = String(layout.gap)
+      inpGroupPad.value = String(layout.padding)
+    }
+  }
+
+  function updateCanvasDimensions(): void {
+    recomputeWorldSize()
+    svg.setAttribute('viewBox', `0 0 ${worldW} ${worldH}`)
+    svg.setAttribute('width', String(worldW))
+    svg.setAttribute('height', String(worldH))
+    canvasBgEl.setAttribute('width', String(worldW))
+    canvasBgEl.setAttribute('height', String(worldH))
+    syncWorkspaceChrome()
+  }
+
+  function renderFrameOutlines(): void {
+    frameOutlinesG.replaceChildren()
+    const inactiveStroke = 'rgba(124,156,255,0.35)'
+    const activeStroke = '#7c9cff'
+    for (const f of frames) {
+      // One full-canvas frame reads as a permanent “selection” over the grid; skip chrome
+      // so zoom/pan feels like a free workspace (outlines return for multi-frame or inset frames).
+      if (
+        frames.length === 1 &&
+        f.x === 0 &&
+        f.y === 0 &&
+        f.width >= worldW &&
+        f.height >= worldH
+      ) {
+        continue
+      }
+      const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
+      r.setAttribute('x', String(f.x))
+      r.setAttribute('y', String(f.y))
+      r.setAttribute('width', String(f.width))
+      r.setAttribute('height', String(f.height))
+      r.setAttribute('fill', 'none')
+      const isActive = f.id === activeFrameId
+      r.setAttribute(
+        'stroke',
+        frames.length > 1 && isActive ? activeStroke : inactiveStroke,
+      )
+      r.setAttribute('stroke-width', '1')
+      r.setAttribute('stroke-dasharray', '6 4')
+      r.setAttribute('vector-effect', 'non-scaling-stroke')
+      frameOutlinesG.appendChild(r)
+    }
+  }
+
+  function syncFramePicker(): void {
+    const cur = popFramePick.value
+    popFramePick.replaceChildren()
+    for (const f of frames) {
+      const o = document.createElement('option')
+      o.value = f.id
+      o.textContent = f.label
+      popFramePick.appendChild(o)
+    }
+    if (frames.some((f) => f.id === cur)) popFramePick.value = cur
+    else popFramePick.value = activeFrameId
+  }
+
   function commit(): void {
     pruneLayerNames()
+    updateCanvasDimensions()
+    renderFrameOutlines()
+    syncFramePicker()
     renderItems()
     renderHandles()
     renderLayers()
     renderStaticGuides()
     if (!propsPanelFocused) syncPropsFromSelection()
+    if (!stylePanelFocused) syncStyleFromSelection()
+    syncTypographyPanel()
+    syncGroupLayoutPanel()
     schedulePersist()
   }
+
+  let aiAbort: AbortController | null = null
+
+  async function runAiDesign(): Promise<void> {
+    const prompt = aiPromptTextarea.value.trim()
+    if (!prompt) return
+    const modelId = aiModelSelect.value.trim() || defaultGeminiModelId()
+    const endpoint = buildGeminiGenerateContentUrl(modelId)
+    const apiKey = aiKeyInput.value.trim()
+    if (!apiKey) {
+      appendAiLog('err', 'Add your Google AI Studio API key under API connection.')
+      return
+    }
+    writeAiKey(apiKey)
+    writeAiModel(modelId)
+
+    const docJson = documentToV3Json(buildDocumentV3())
+    const userContent = `Context: POP is a vibe designing tool for web and mobile—frames are artboards; the document below is the live canvas state.
+
+Current document (PopDocumentV3 JSON):\n${docJson}\n\nUser request:\n${prompt}\n\nRespond with ONLY a JSON array of patch ops, or a single object {"ops":[...]}.`
+
+    aiAbort?.abort()
+    aiAbort = new AbortController()
+    btnAiSend.disabled = true
+    aiStatusEl.textContent = 'Waiting for model…'
+    appendAiLog('user', prompt)
+
+    const chat = await fetchDesignLlmReply({
+      endpoint,
+      apiKey,
+      model: modelId,
+      systemPrompt: buildDesignLlmSystemPrompt(),
+      userContent,
+      signal: aiAbort.signal,
+    })
+
+    btnAiSend.disabled = false
+    aiAbort = null
+    aiStatusEl.textContent = ''
+
+    if (!chat.ok) {
+      if (chat.error === 'aborted') return
+      appendAiLog('err', chat.error)
+      return
+    }
+
+    const parsed = parsePatchOpsFromLlmText(chat.content)
+    if (!parsed.ok) {
+      appendAiLog('err', parsed.error)
+      appendAiLog('model', chat.content.slice(0, 6000))
+      return
+    }
+
+    if (parsed.ops.length === 0) {
+      appendAiLog('sys', 'Model returned no operations.')
+      return
+    }
+
+    const patched = applyPatch(buildDocumentV3(), parsed.ops)
+    if (!patched.ok) {
+      appendAiLog('err', patched.error)
+      return
+    }
+
+    applyDocumentV3(patched.doc)
+    selected.clear()
+    commit()
+    syncViewportTransform()
+    updateZoomPctLabel()
+    appendAiLog('sys', `Applied ${parsed.ops.length} patch op(s).`)
+    aiPromptTextarea.value = ''
+  }
+
+  btnAiSend.addEventListener('click', () => {
+    void runAiDesign()
+  })
+  aiPromptTextarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault()
+      void runAiDesign()
+    }
+  })
 
   function clientToSvg(ev: PointerEvent): { x: number; y: number } {
     return clientToSvgCoords(ev.clientX, ev.clientY)
@@ -2190,6 +3429,8 @@ export function mount(root: HTMLElement): void {
 
   btnGroup.addEventListener('click', () => groupSelection())
   btnUngroup.addEventListener('click', () => ungroupSelection())
+  btnBringFront.addEventListener('click', () => bringSelectionToFront())
+  btnSendBack.addEventListener('click', () => sendSelectionToBack())
   btnCreateComp.addEventListener('click', () => createComponentFromSelection())
   btnDetach.addEventListener('click', () => detachInstance())
   btnEditComp.addEventListener('click', () => {
@@ -2209,26 +3450,58 @@ export function mount(root: HTMLElement): void {
   syncViewportTransform()
   updateZoomPctLabel()
 
-  btnZoomIn.addEventListener('click', () => {
-    zoomAtWorldPoint(VIEW_W / 2, VIEW_H / 2, viewScale * 1.2)
+  const gridSyncRo = new ResizeObserver(() => syncWorkspaceChrome())
+  gridSyncRo.observe(canvasWrap)
+  canvasWrap.addEventListener('scroll', () => syncWorkspaceChrome(), { passive: true })
+  requestAnimationFrame(() => {
+    syncWorkspaceChrome()
+    requestAnimationFrame(() => syncWorkspaceChrome())
   })
-  btnZoomOut.addEventListener('click', () => {
-    zoomAtWorldPoint(VIEW_W / 2, VIEW_H / 2, viewScale / 1.2)
+
+  function bindZoomControls(
+    btnIn: HTMLButtonElement,
+    btnOut: HTMLButtonElement,
+    btnReset: HTMLButtonElement,
+  ): void {
+    btnIn.addEventListener('click', () => {
+      zoomAtWorldPoint(worldW / 2, worldH / 2, viewScale * 1.2)
+    })
+    btnOut.addEventListener('click', () => {
+      zoomAtWorldPoint(worldW / 2, worldH / 2, viewScale / 1.2)
+    })
+    btnReset.addEventListener('click', () => {
+      viewTx = 0
+      viewTy = 0
+      viewScale = 1
+      syncViewportTransform()
+      updateZoomPctLabel()
+      schedulePersist()
+    })
+  }
+  bindZoomControls(btnZoomIn, btnZoomOut, btnZoomReset)
+  bindZoomControls(btnZoomInDock, btnZoomOutDock, btnZoomResetDock)
+
+  btnZoomFit.addEventListener('click', () => {
+    zoomToFitCanvas()
   })
-  btnZoomReset.addEventListener('click', () => {
-    viewTx = 0
-    viewTy = 0
-    viewScale = 1
-    syncViewportTransform()
-    updateZoomPctLabel()
-    schedulePersist()
+  btnZoomFitDock.addEventListener('click', () => {
+    zoomToFitCanvas()
   })
 
   canvasWrap.addEventListener(
     'wheel',
     (ev) => {
-      if (!ev.ctrlKey && !ev.metaKey) return
       if (!canvasWrap.contains(ev.target as Node)) return
+      // ⌘+scroll: pan. Ctrl+scroll / pinch (ctrl) keeps zoom; avoids ⌘ also setting ctrl on some setups.
+      if (ev.metaKey && !ev.ctrlKey) {
+        ev.preventDefault()
+        viewTx -= ev.deltaX
+        viewTy -= ev.deltaY
+        syncViewportTransform()
+        schedulePersist()
+        return
+      }
+      if (!ev.ctrlKey) return
       ev.preventDefault()
       const wf = clientToSvgCoords(ev.clientX, ev.clientY)
       const factor = Math.exp(-ev.deltaY * 0.002)
@@ -2244,6 +3517,7 @@ export function mount(root: HTMLElement): void {
       const it = getNode(id)
       if (!it) continue
       if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text') {
+        delete it.fillToken
         it.fill = defaultFill
       }
     }
@@ -2256,10 +3530,145 @@ export function mount(root: HTMLElement): void {
     for (const id of selected) {
       const it = getNode(id)
       if (it && (it.type === 'rect' || it.type === 'ellipse')) {
+        delete it.strokeToken
         it.stroke = defaultStroke
       }
     }
     commit()
+  })
+
+  fillTokenSelect.addEventListener('change', () => {
+    if (tokenUiSyncing) return
+    const v = fillTokenSelect.value || undefined
+    for (const id of selected) {
+      const it = getNode(id)
+      if (!it) continue
+      if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text') {
+        if (v) it.fillToken = v
+        else delete it.fillToken
+      }
+    }
+    syncStyleFromSelection()
+    commit()
+  })
+
+  strokeTokenSelect.addEventListener('change', () => {
+    if (tokenUiSyncing) return
+    const v = strokeTokenSelect.value || undefined
+    for (const id of selected) {
+      const it = getNode(id)
+      if (!it) continue
+      if (it.type === 'rect' || it.type === 'ellipse') {
+        if (v) it.strokeToken = v
+        else delete it.strokeToken
+      }
+    }
+    syncStyleFromSelection()
+    commit()
+  })
+
+  function handoffCopyTokensJson(): void {
+    copyTextToClipboard(tokensToJson(tokens))
+  }
+
+  function handoffCopyCssVars(): void {
+    copyTextToClipboard(tokensToCssRootBlock(tokens))
+  }
+
+  btnTokenColorAdd.addEventListener('click', () => {
+    ensureTokenBuckets()
+    let n = Object.keys(tokens.colors!).length + 1
+    let name = `color${n}`
+    while (tokens.colors![name]) {
+      n++
+      name = `color${n}`
+    }
+    tokens.colors![name] = '#7c6f9a'
+    renderTokensPanel()
+    refreshFillStrokeTokenSelects()
+    schedulePersist()
+    commit()
+  })
+
+  btnTokenRadiusAdd.addEventListener('click', () => {
+    ensureTokenBuckets()
+    let n = Object.keys(tokens.radii!).length + 1
+    let name = `radius${n}`
+    while (tokens.radii![name]) {
+      n++
+      name = `radius${n}`
+    }
+    tokens.radii![name] = 8
+    renderTokensPanel()
+    schedulePersist()
+  })
+
+  btnTokenSpaceAdd.addEventListener('click', () => {
+    ensureTokenBuckets()
+    let n = Object.keys(tokens.space!).length + 1
+    let name = `space${n}`
+    while (tokens.space![name]) {
+      n++
+      name = `space${n}`
+    }
+    tokens.space![name] = 16
+    renderTokensPanel()
+    schedulePersist()
+  })
+
+  btnCopyTokensJson.addEventListener('click', () => handoffCopyTokensJson())
+  btnRibbonCopyTokensJson.addEventListener('click', () => handoffCopyTokensJson())
+  btnDownloadTokensJson.addEventListener('click', () => {
+    downloadTextFile(tokensToJson(tokens), 'pop-tokens.json', 'application/json;charset=utf-8')
+  })
+  btnCopyCssVars.addEventListener('click', () => handoffCopyCssVars())
+  btnRibbonCopyCssVars.addEventListener('click', () => handoffCopyCssVars())
+
+  btnTokenImportPick.addEventListener('click', () => tokenImportFile.click())
+  tokenImportFile.addEventListener('change', () => {
+    const file = tokenImportFile.files?.[0]
+    tokenImportFile.value = ''
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result)) as unknown
+        const r = importDesignTokensFromJson(parsed)
+        if (!r.ok) {
+          alert(r.message)
+          return
+        }
+        ensureTokenBuckets()
+        if (tokenImportReplace.checked) {
+          tokens = r.tokens
+        } else {
+          tokens = mergeDesignTokens(tokens, r.tokens)
+        }
+        renderTokensPanel()
+        refreshFillStrokeTokenSelects()
+        schedulePersist()
+        commit()
+      } catch {
+        alert('Could not parse JSON.')
+      }
+    }
+    reader.readAsText(file)
+  })
+
+  taHtmlExportStylesheets.addEventListener('input', () => {
+    htmlExportStylesheets = parseStylesheetLines(taHtmlExportStylesheets.value)
+    schedulePersist()
+  })
+
+  selDsPreset.addEventListener('change', () => {
+    const id = selDsPreset.value
+    selDsPreset.value = ''
+    if (!id) return
+    const p = DESIGN_SYSTEM_PRESETS.find((x) => x.id === id)
+    if (!p || p.id === 'none') return
+    htmlExportStylesheets = [...p.stylesheetUrls]
+    syncHtmlExportStylesheetsUi()
+    schedulePersist()
   })
 
   strokeWInput.addEventListener('input', () => {
@@ -2268,6 +3677,31 @@ export function mount(root: HTMLElement): void {
       const it = getNode(id)
       if (it && (it.type === 'rect' || it.type === 'ellipse')) {
         it.strokeWidth = defaultStrokeWidth
+      }
+    }
+    commit()
+  })
+
+  opacityInput.addEventListener('input', () => {
+    syncChromeFromInputs()
+    const o = defaultOpacity
+    for (const id of selected) {
+      const it = getNode(id)
+      if (it && (it.type === 'rect' || it.type === 'ellipse' || it.type === 'text' || it.type === 'image')) {
+        it.opacity = o
+      }
+    }
+    commit()
+  })
+
+  rxInput.addEventListener('input', () => {
+    syncChromeFromInputs()
+    const want = defaultRx
+    for (const id of selected) {
+      const it = getNode(id)
+      if (it?.type === 'rect') {
+        it.rx = want
+        clampRectCornerRadius(it)
       }
     }
     commit()
@@ -2296,8 +3730,9 @@ export function mount(root: HTMLElement): void {
         return `  <g transform="translate(${o.x} ${o.y})">\n${inner}\n  </g>`
       })
       .join('\n')
+    const f = getActiveFrame()
     const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${VIEW_W}" height="${VIEW_H}" viewBox="0 0 ${VIEW_W} ${VIEW_H}">
+<svg xmlns="http://www.w3.org/2000/svg" width="${f.width}" height="${f.height}" viewBox="0 0 ${f.width} ${f.height}">
 ${parts}
 </svg>
 `
@@ -2305,7 +3740,11 @@ ${parts}
   })
 
   btnExportAll.addEventListener('click', () => {
-    downloadSvg(serializeSvgFromRoots(rootIds, nodes, definitions, VIEW_W, VIEW_H), 'pop-canvas.svg')
+    const f = getActiveFrame()
+    downloadSvg(
+      serializeSvgFromRoots(roots(), nodes, definitions, f.width, f.height, tokens),
+      `pop-frame-${f.label.replace(/\s+/g, '-')}.svg`,
+    )
   })
 
   tabLayersBtn.addEventListener('click', () => setLayersAsideTab('layers'))
@@ -2317,6 +3756,7 @@ ${parts}
     selected = new Set(siblingListForParent(p))
     updateSelectionUi()
     syncPropsFromSelection()
+    syncStyleFromSelection()
     renderHandles()
   })
 
@@ -2335,8 +3775,9 @@ ${parts}
         const scale = Math.min(1, max / w, max / h)
         w *= scale
         h *= scale
-        const x = (VIEW_W - w) / 2
-        const y = (VIEW_H - h) / 2
+        const fr = getActiveFrame()
+        const x = fr.x + (fr.width - w) / 2
+        const y = fr.y + (fr.height - h) / 2
         const nid = newId()
         nodes.set(nid, {
           id: nid,
@@ -2347,8 +3788,9 @@ ${parts}
           width: w,
           height: h,
           href,
+          opacity: defaultOpacity,
         })
-        rootIds.push(nid)
+        roots().push(nid)
         selected = new Set([nid])
         setTool('select')
         commit()
@@ -2400,6 +3842,7 @@ ${parts}
         }
         updateSelectionUi()
         syncPropsFromSelection()
+        syncStyleFromSelection()
         renderHandles()
         dragState.active = true
         dragState.pointerId = ev.pointerId
@@ -2416,6 +3859,7 @@ ${parts}
         if (!additiveMultiSelect(ev)) selected.clear()
         updateSelectionUi()
         syncPropsFromSelection()
+        syncStyleFromSelection()
         renderHandles()
       }
       return
@@ -2440,8 +3884,11 @@ ${parts}
         fill: defaultFill,
         stroke: defaultStroke,
         strokeWidth: defaultStrokeWidth,
+        rx: defaultRx,
+        opacity: defaultOpacity,
       })
-      rootIds.push(nid)
+      clampRectCornerRadius(nodes.get(nid)!)
+      roots().push(nid)
       selected = new Set([nid])
       setTool('select')
     } else if (tool === 'ellipse') {
@@ -2459,8 +3906,9 @@ ${parts}
         fill: defaultFill,
         stroke: defaultStroke,
         strokeWidth: defaultStrokeWidth,
+        opacity: defaultOpacity,
       })
-      rootIds.push(nid)
+      roots().push(nid)
       selected = new Set([nid])
       setTool('select')
     } else if (tool === 'text') {
@@ -2479,8 +3927,13 @@ ${parts}
         content,
         fontSize,
         fill: defaultFill,
+        opacity: defaultOpacity,
+        fontFamily: 'system-ui, sans-serif',
+        fontWeight: 400,
+        letterSpacing: 0,
+        lineHeight: 1.2,
       })
-      rootIds.push(nid)
+      roots().push(nid)
       selected = new Set([nid])
       setTool('select')
     }
@@ -2506,9 +3959,11 @@ ${parts}
         const ratio = Math.min(out.width / sw, out.height / sh)
         it.fontSize = clamp(Math.round(resizeState.startFontSize * ratio), 4, 400)
       }
+      if (it.type === 'rect') clampRectCornerRadius(it)
       renderItems()
       renderHandles()
       if (!propsPanelFocused) syncPropsFromSelection()
+      if (!stylePanelFocused) syncStyleFromSelection()
       return
     }
 
@@ -2531,10 +3986,11 @@ ${parts}
     if (symmetryGuidesOn && selected.size > 0) {
       const u = unionBoundsWorld(selected, nodes, definitions)
       if (u) {
-        const tx = collectSnapTargetsX(selected, nodes, definitions)
-        const ty = collectSnapTargetsY(selected, nodes, definitions)
-        const sx = snapAxis('x', u.left, u.cx, u.right, tx, SNAP_PX)
-        const sy = snapAxis('y', u.top, u.cy, u.bottom, ty, SNAP_PX)
+        const sb = snapBoundsForFrame()
+        const tx = collectSnapTargetsX(selected, nodes, definitions, sb)
+        const ty = collectSnapTargetsY(selected, nodes, definitions, sb)
+        const sx = snapAxis('x', u.left, u.cx, u.right, tx, SNAP_PX, sb)
+        const sy = snapAxis('y', u.top, u.cy, u.bottom, ty, SNAP_PX, sb)
         if (sx.delta !== 0 || sy.delta !== 0) {
           for (const sid of selected) {
             const it = getNode(sid)
@@ -2572,6 +4028,7 @@ ${parts}
       renderHandles()
       renderLayers()
       if (!propsPanelFocused) syncPropsFromSelection()
+      if (!stylePanelFocused) syncStyleFromSelection()
       schedulePersist()
       return
     }
@@ -2592,6 +4049,7 @@ ${parts}
     renderLayers()
     renderHandles()
     if (!propsPanelFocused) syncPropsFromSelection()
+    if (!stylePanelFocused) syncStyleFromSelection()
     schedulePersist()
   })
 
@@ -2604,6 +4062,7 @@ ${parts}
       renderHandles()
       renderLayers()
       if (!propsPanelFocused) syncPropsFromSelection()
+      if (!stylePanelFocused) syncStyleFromSelection()
       schedulePersist()
       return
     }
@@ -2617,6 +4076,7 @@ ${parts}
       renderLayers()
       renderHandles()
       if (!propsPanelFocused) syncPropsFromSelection()
+      if (!stylePanelFocused) syncStyleFromSelection()
       schedulePersist()
     }
   })
@@ -2626,9 +4086,45 @@ ${parts}
       exitComponentEdit(false)
       return
     }
+    const tEl = ev.target as HTMLElement | null
+    const inFormField =
+      Boolean(tEl?.closest?.('input, textarea, select, [contenteditable="true"]')) ||
+      Boolean(tEl?.isContentEditable)
+    if (inFormField) {
+      if (ev.key === 'Delete' || ev.key === 'Backspace') return
+      if (ev.metaKey || ev.ctrlKey) {
+        const k = ev.key.toLowerCase()
+        if (k === 'c' || k === 'v') return
+      }
+    }
+    const mod = ev.metaKey || ev.ctrlKey
+    if (mod) {
+      const k = ev.key.toLowerCase()
+      if (k === 'c') {
+        if (selected.size === 0) return
+        ev.preventDefault()
+        void copySelectionToSystemClipboard()
+        return
+      }
+      if (k === 'v') {
+        ev.preventDefault()
+        void pasteFromSystemClipboard()
+        return
+      }
+      if (ev.shiftKey && selected.size > 0) {
+        if (ev.code === 'BracketRight') {
+          ev.preventDefault()
+          bringSelectionToFront()
+          return
+        }
+        if (ev.code === 'BracketLeft') {
+          ev.preventDefault()
+          sendSelectionToBack()
+          return
+        }
+      }
+    }
     if (ev.key === 'Delete' || ev.key === 'Backspace') {
-      const t = ev.target as HTMLElement
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
       if (selected.size === 0) return
       ev.preventDefault()
       deleteNodesSubtrees(selectedDeletionRoots())
@@ -2636,6 +4132,139 @@ ${parts}
       commit()
     }
   })
+
+  popFramePick.addEventListener('change', () => {
+    const v = popFramePick.value
+    if (frames.some((x) => x.id === v)) {
+      activeFrameId = v
+      commit()
+    }
+  })
+
+  btnFrameAdd.addEventListener('click', () => {
+    const b = computeWorldBoundsWithContent(frames, nodes, definitions, VIEW_W, VIEW_H)
+    const nf = createDefaultFrame()
+    nf.x = b.worldW + 32
+    nf.y = 0
+    nf.width = 390
+    nf.height = 844
+    nf.label = `Frame ${frames.length + 1}`
+    frames.push(nf)
+    activeFrameId = nf.id
+    commit()
+  })
+
+  btnDocOpen.addEventListener('click', () => {
+    docFileInput.click()
+  })
+
+  docFileInput.addEventListener('change', () => {
+    const file = docFileInput.files?.[0]
+    docFileInput.value = ''
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result)) as unknown
+        const doc = loadDocumentV3(parsed)
+        if (!doc) {
+          alert('Invalid Pop document JSON.')
+          return
+        }
+        applyDocumentV3(doc)
+        selected.clear()
+        commit()
+      } catch {
+        alert('Could not read document file.')
+      }
+    }
+    reader.readAsText(file)
+  })
+
+  btnDocSave.addEventListener('click', () => {
+    const json = documentToV3Json(buildDocumentV3())
+    const blob = new Blob([json], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${(docName || 'pop').replace(/[^\w.-]+/g, '-')}.pop.json`
+    a.rel = 'noopener'
+    a.click()
+    URL.revokeObjectURL(url)
+  })
+
+  btnExportHtml.addEventListener('click', () => {
+    const f = getActiveFrame()
+    const html = exportFrameToHtml(f, nodes, definitions, tokens, {
+      title: docName,
+      stylesheetUrls: htmlExportStylesheets,
+    })
+    downloadHtml(html, `${(f.label || 'frame').replace(/\s+/g, '-')}.html`)
+  })
+
+  btnExportHtmlAll.addEventListener('click', () => {
+    let delay = 0
+    for (const f of frames) {
+      const html = exportFrameToHtml(f, nodes, definitions, tokens, {
+        title: `${docName} · ${f.label}`,
+        stylesheetUrls: htmlExportStylesheets,
+      })
+      const name = `${(f.label || 'frame').replace(/\s+/g, '-')}.html`
+      window.setTimeout(() => downloadHtml(html, name), delay)
+      delay += 200
+    }
+  })
+
+  function applyTypographyFromInputs(): void {
+    const ff = inpFontFamily.value.trim() || 'system-ui, sans-serif'
+    const fw = clamp(Math.round(Number(inpFontWeight.value) || 400), 100, 900)
+    const ls = Number.isFinite(Number(inpLetterSpacing.value)) ? Number(inpLetterSpacing.value) : 0
+    const lh =
+      Number.isFinite(Number(inpLineHeight.value)) && Number(inpLineHeight.value) > 0
+        ? Number(inpLineHeight.value)
+        : 1.2
+    for (const id of selected) {
+      const it = getNode(id)
+      if (it?.type !== 'text') continue
+      it.fontFamily = ff
+      it.fontWeight = fw
+      it.letterSpacing = ls
+      it.lineHeight = lh
+    }
+    commit()
+  }
+
+  ;[inpFontFamily, inpFontWeight, inpLetterSpacing, inpLineHeight].forEach((el) => {
+    el.addEventListener('change', () => applyTypographyFromInputs())
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') applyTypographyFromInputs()
+    })
+  })
+
+  function applyGroupLayoutFromInputs(): void {
+    const id = [...selected][0]
+    const g = id ? getNode(id) : undefined
+    if (!g || g.type !== 'group') return
+    const mode = selGroupLayout.value
+    let layout: GroupLayout
+    if (mode === 'none') layout = { type: 'none' }
+    else {
+      const gap = Math.max(0, Math.round(Number(inpGroupGap.value) || 0))
+      const padding = Math.max(0, Math.round(Number(inpGroupPad.value) || 0))
+      layout = {
+        type: 'stack',
+        direction: mode === 'stack-h' ? 'horizontal' : 'vertical',
+        gap,
+        padding,
+      }
+    }
+    g.layout = layout
+    commit()
+  }
+
+  selGroupLayout.addEventListener('change', () => applyGroupLayoutFromInputs())
+  inpGroupGap.addEventListener('change', () => applyGroupLayoutFromInputs())
+  inpGroupPad.addEventListener('change', () => applyGroupLayoutFromInputs())
 
   setBaseSymHint()
   commit()
